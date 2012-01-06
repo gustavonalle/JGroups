@@ -144,9 +144,9 @@ public class RACKSPACE_PING extends FILE_PING {
                     .addHeader(AUTH_KEY_HEADER, apiKey)
                     .getConnection();
 
-            Response response = doAuthOperation(urlConnection);
+            Response response = doOperation(urlConnection, null);
 
-            if (response.isSuccessCode()) {
+            if (response != null && response.isSuccessCode()) {
                 credentials = new Credentials(
                         response.getHeader(STORAGE_TOKEN_HEADER),
                         response.getHeader(STORAGE_URL_HEADER)
@@ -154,7 +154,7 @@ public class RACKSPACE_PING extends FILE_PING {
 
                 log.trace("Authentication successful");
             } else {
-                throw new IllegalStateException("Error authenticating to the service. Please check your credentials. Code = " + response.code);
+                throw new IllegalStateException("Error authenticating to the service. Please check your credentials. Code = " + response);
             }
 
         }
@@ -170,15 +170,13 @@ public class RACKSPACE_PING extends FILE_PING {
                     .method("DELETE")
                     .getConnection();
 
-            Response response = doVoidOperation(urlConnection);
+            Response response = doOperation(urlConnection, null);
 
-            if (!response.isSuccessCode()) {
+            if (response != null && !response.isSuccessCode()) {
                 if (response.isAuthDenied()) {
                     log.warn("Refreshing credentials and retrying");
                     authenticate();
                     deleteObject(containerName, objectName);
-                } else {
-                    log.error("Error deleting object " + objectName + " from container " + containerName + ",code = " + response.code);
                 }
             }
 
@@ -194,15 +192,13 @@ public class RACKSPACE_PING extends FILE_PING {
                     .method("PUT")
                     .getConnection();
 
-            Response response = doVoidOperation(urlConnection);
+            Response response = doOperation(urlConnection, null);
 
-            if (!response.isSuccessCode()) {
+            if (response != null && !response.isSuccessCode()) {
                 if (response.isAuthDenied()) {
                     log.warn("Refreshing credentials and retrying");
                     authenticate();
                     createContainer(containerName);
-                } else {
-                    log.error("Error creating container " + containerName + " ,code = " + response.code);
                 }
             }
         }
@@ -220,15 +216,13 @@ public class RACKSPACE_PING extends FILE_PING {
                     .addHeader(CONTENT_LENGTH_HEADER, String.valueOf(contents.length))
                     .getConnection();
 
-            Response response = doSendOperation(conn, contents);
+            Response response = doOperation(conn, contents);
 
-            if (!response.isSuccessCode()) {
+            if (response != null && !response.isSuccessCode()) {
                 if (response.isAuthDenied()) {
                     log.warn("Refreshing credentials and retrying");
                     authenticate();
                     createObject(containerName, objectName, contents);
-                } else {
-                    log.error("Error creating object " + objectName + " in container " + containerName + ",code = " + response.code);
                 }
             }
 
@@ -244,15 +238,13 @@ public class RACKSPACE_PING extends FILE_PING {
         public byte[] readObject(String containerName, String objectName) {
             HttpURLConnection urlConnection = new ConnBuilder(credentials, containerName, objectName).getConnection();
 
-            Response response = doReadOperation(urlConnection);
+            Response response = doOperation(urlConnection, null);
 
-            if (!response.isSuccessCode()) {
+            if (response != null && !response.isSuccessCode()) {
                 if (response.isAuthDenied()) {
                     log.warn("Refreshing credentials and retrying");
                     authenticate();
                     return readObject(containerName, objectName);
-                } else {
-                    log.error("Error reading object " + objectName + " from container " + containerName + ", code = " + response.code);
                 }
             }
             return response.payload;
@@ -268,17 +260,14 @@ public class RACKSPACE_PING extends FILE_PING {
         public List<String> listObjects(String containerName) {
             HttpURLConnection urlConnection = new ConnBuilder(credentials, containerName, null).getConnection();
 
-            Response response = doReadOperation(urlConnection);
+            Response response = doOperation(urlConnection, null);
 
-            if (!response.isSuccessCode()) {
+            if (response != null && !response.isSuccessCode()) {
                 if (response.isAuthDenied()) {
                     log.warn("Refreshing credentials and retrying");
                     authenticate();
                     return listObjects(containerName);
-                } else {
-                    log.error("Error listing container " + containerName + ", code = " + response.code);
                 }
-
             }
             return response.payloadAsLines();
         }
@@ -287,11 +276,10 @@ public class RACKSPACE_PING extends FILE_PING {
          * Do a http operation
          *
          * @param urlConnection the HttpURLConnection to be used
-         * @param inputData     if not null,will be written to the urlconnection.
-         * @param hasOutput     if true, read content back from the urlconnection
+         * @param inputData     if provided, will be written to the URLConnection.
          * @return Response
          */
-        private Response doOperation(HttpURLConnection urlConnection, byte[] inputData, boolean hasOutput) {
+        private Response doOperation(HttpURLConnection urlConnection, byte[] inputData) {
             Response response = null;
             InputStream inputStream = null;
             OutputStream outputStream = null;
@@ -302,11 +290,17 @@ public class RACKSPACE_PING extends FILE_PING {
                     outputStream = urlConnection.getOutputStream();
                     outputStream.write(inputData);
                 }
-                if (hasOutput) {
+                int responseCode = urlConnection.getResponseCode();
+                String contentSizeField = urlConnection.getHeaderField(CONTENT_LENGTH_HEADER);
+
+                boolean isSuccessCode = responseCode >= 200 && responseCode < 300;
+                boolean hasContent = contentSizeField == null ? false : Integer.valueOf(contentSizeField) > 0;
+
+                if (isSuccessCode & hasContent) {
                     inputStream = urlConnection.getInputStream();
                     payload = Util.readFileContents(urlConnection.getInputStream());
                 }
-                response = new Response(urlConnection.getHeaderFields(), urlConnection.getResponseCode(), payload);
+                response = new Response(urlConnection.getHeaderFields(), responseCode, payload);
 
             } catch (IOException e) {
                 log.error("Error calling service", e);
@@ -319,44 +313,10 @@ public class RACKSPACE_PING extends FILE_PING {
         }
 
         /**
-         * Do a http auth operation, will not handle 401 permission denied errors
-         *
-         * @param urlConnection the HttpURLConnection to be used
-         * @return Response  Response
+         * Expire current authentication state, useful for testing purposes
          */
-        private Response doAuthOperation(HttpURLConnection urlConnection) {
-            return doOperation(urlConnection, null, false);
-        }
-
-        /**
-         * Do a operation that does not write or read from HttpURLConnection, except for the headers
-         *
-         * @param urlConnection the connection
-         * @return Response
-         */
-        private Response doVoidOperation(HttpURLConnection urlConnection) {
-            return doOperation(urlConnection, null, false);
-        }
-
-        /**
-         * Do a operation that writes content to the HttpURLConnection
-         *
-         * @param urlConnection the connection
-         * @param content       The content to send
-         * @return Response
-         */
-        private Response doSendOperation(HttpURLConnection urlConnection, byte[] content) {
-            return doOperation(urlConnection, content, false);
-        }
-
-        /**
-         * Do a operation that reads from the httpconnection
-         *
-         * @param urlConnection The connections
-         * @return Response
-         */
-        private Response doReadOperation(HttpURLConnection urlConnection) {
-            return doOperation(urlConnection, null, true);
+        public void expireCredentials() {
+            this.credentials = new Credentials("", credentials.storageURL);
         }
 
         /**
@@ -411,7 +371,7 @@ public class RACKSPACE_PING extends FILE_PING {
         }
 
         /**
-         * Result of an successfully authenticated session
+         * Result of a successfully authenticated session
          */
         private class Credentials {
             private final String authToken;
@@ -450,19 +410,26 @@ public class RACKSPACE_PING extends FILE_PING {
                 return code == 401;
             }
 
+            @Override
+            public String toString() {
+                return "[code = " + code + "]";
+            }
+
             public List<String> payloadAsLines() {
                 List<String> lines = new ArrayList<String>();
-                BufferedReader in;
-                try {
-                    String line;
-                    in = new BufferedReader(new InputStreamReader(new ByteArrayInputStream(payload)));
+                if (payload != null) {
+                    BufferedReader in;
+                    try {
+                        String line;
+                        in = new BufferedReader(new InputStreamReader(new ByteArrayInputStream(payload)));
 
-                    while ((line = in.readLine()) != null) {
-                        lines.add(line);
+                        while ((line = in.readLine()) != null) {
+                            lines.add(line);
+                        }
+                        in.close();
+                    } catch (IOException e) {
+                        log.error("Error reading objects", e);
                     }
-                    in.close();
-                } catch (IOException e) {
-                    log.error("Error reading objects", e);
                 }
                 return lines;
             }
