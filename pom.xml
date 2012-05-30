@@ -5,7 +5,7 @@
     <artifactId>jgroups</artifactId>
     <packaging>bundle</packaging>
     <name>JGroups</name>
-    <version>3.1.0.Alpha1</version>
+    <version>3.1.0.Beta2</version>
     <url>http://www.jgroups.org</url>
     <description>
         Reliable cluster communication toolkit
@@ -81,12 +81,19 @@
             <optional>true</optional>
             <scope>compile</scope>
         </dependency>
-        <!--  Tests not included in maven build currently so commented out -->
-        <!-- <dependency>
+
+        <!-- Test dependencies -->
+        <dependency>
             <groupId>org.testng</groupId>
             <artifactId>testng</artifactId>
-            <version>5.10</version>
+            <version>5.11</version>
             <classifier>jdk15</classifier>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.jboss.byteman</groupId>
+            <artifactId>byteman-bmunit</artifactId>
+            <version>2.0.0</version>
             <scope>test</scope>
         </dependency>
         <dependency>
@@ -94,7 +101,7 @@
             <artifactId>bcprov-jdk15</artifactId>
             <version>140</version>
             <scope>test</scope>
-        </dependency> -->
+        </dependency>
     </dependencies>
     <build>
         <sourceDirectory>src</sourceDirectory>
@@ -109,7 +116,21 @@
                 </excludes>
             </resource>
             <resource>
-                <directory>${project.build.outputDirectory}/schema</directory>
+                <directory>${project.build.directory}/schema</directory>
+            </resource>
+            <resource>
+               <directory>${project.basedir}</directory>
+               <includes>
+                  <include>INSTALL.html</include>
+                  <include>LICENSE</include>
+                  <include>README</include>
+               </includes>
+            </resource>
+            <resource>
+              <directory>${project.basedir}/lib</directory>
+              <includes>
+                 <include>licenses/thirdparty*</include>
+              </includes>
             </resource>
         </resources>
         <plugins>
@@ -124,10 +145,48 @@
                     </excludes>
                 </configuration>
             </plugin>
-            <plugin>
+           <plugin>
+              <groupId>org.codehaus.mojo</groupId>
+              <artifactId>build-helper-maven-plugin</artifactId>
+              <version>1.7</version>
+              <executions>
+                 <execution>
+                    <id>add-source</id>
+                    <phase>validate</phase>
+                    <goals>
+                       <goal>add-source</goal>
+                    </goals>
+                    <configuration>
+                       <sources>
+                          <!-- These tests have to go in the main jar -->
+                          <source>tests/other</source>
+                          <source>tests/perf</source>
+                       </sources>
+                    </configuration>
+                 </execution>
+                 <execution>
+                    <id>add-test-source</id>
+                    <phase>validate</phase>
+                    <goals>
+                       <goal>add-test-source</goal>
+                    </goals>
+                    <configuration>
+                       <sources>
+                          <source>tests/byteman</source>
+                          <source>tests/junit</source>
+                          <source>tests/junit-functional</source>
+                          <!-- tests/other and tests/perf are included in the normal sources -->
+                          <source>tests/stress</source>
+                       </sources>
+                    </configuration>
+                 </execution>
+              </executions>
+           </plugin>
+           <plugin>
                 <artifactId>maven-antrun-plugin</artifactId>
                 <executions>
                     <execution>
+                        <id>compile</id>
                         <phase>compile</phase>
                         <goals>
                             <goal>run</goal>
@@ -136,14 +195,14 @@
                             <tasks>
                                 <property name="compile_classpath" refid="maven.compile.classpath"/>
                                 <property name="plugin_classpath" refid="maven.plugin.classpath"/>
-                                <delete dir="${project.build.outputDirectory}/schema" failonerror="false"/>
-                                <mkdir dir="${project.build.outputDirectory}/schema"/>
+                                <delete dir="${project.build.directory}/schema" failonerror="false"/>
+                                <mkdir dir="${project.build.directory}/schema"/>
                                 <java classname="org.jgroups.util.XMLSchemaGenerator">
                                     <classpath>
                                         <pathelement path="${compile_classpath}"/>
                                         <pathelement path="${plugin_classpath}"/>
                                     </classpath>
-                                    <arg line="-o ${project.build.outputDirectory}/schema"/>
+                                    <arg line="-o ${project.build.directory}/schema"/>
                                 </java>
                             </tasks>
                         </configuration>

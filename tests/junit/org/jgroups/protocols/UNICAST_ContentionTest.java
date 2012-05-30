@@ -21,7 +21,7 @@ public class UNICAST_ContentionTest {
     static final String unicast_props="SHARED_LOOPBACK(thread_pool.queue_max_size=5000;" +
             "thread_pool.rejection_policy=discard;thread_pool.min_threads=20;thread_pool.max_threads=20;" +
             "oob_thread_pool.rejection_policy=discard;enable_bundling=true)"+
-            ":UNICAST(timeout=300,600,1200)";
+            ":UNICAST(xmit_interval=2000)";
     static final String unicast2_props=unicast_props.replace("UNICAST", "UNICAST2");
     static final int NUM_THREADS=100;
     static final int NUM_MSGS=100;
@@ -34,8 +34,8 @@ public class UNICAST_ContentionTest {
 
     @Test(dataProvider="provider")
     public void testSimpleMessageReception(String props) throws Exception {
-        c1=new JChannel(props);
-        c2=new JChannel(props);
+        c1=new JChannel(props); c1.setName("A");
+        c2=new JChannel(props); c2.setName("B");
         MyReceiver r1=new MyReceiver("c1"), r2=new MyReceiver("c2");
         c1.setReceiver(r1);
         c2.setReceiver(r2);
@@ -72,8 +72,8 @@ public class UNICAST_ContentionTest {
     @Test(dataProvider="provider")
     public void testMessageReceptionUnderHighLoad(String props) throws Exception {
         CountDownLatch latch=new CountDownLatch(1);
-        c1=new JChannel(props);
-        c2=new JChannel(props);
+        c1=new JChannel(props); c1.setName("A");
+        c2=new JChannel(props); c2.setName("B");
         MyReceiver r1=new MyReceiver("c1"), r2=new MyReceiver("c2");
         c1.setReceiver(r1);
         c2.setReceiver(r2);
@@ -92,8 +92,13 @@ public class UNICAST_ContentionTest {
             c2_senders[i].start();
         }
 
-        Util.sleep(500);
         latch.countDown(); // starts all threads
+
+        for(MySender sender: c1_senders)
+            sender.join();
+        for(MySender sender: c2_senders)
+            sender.join();
+        System.out.println("Senders are done, waiting for all messages to be received");
 
         long NUM_EXPECTED_MSGS=NUM_THREADS * NUM_MSGS;
 
@@ -117,7 +122,7 @@ public class UNICAST_ContentionTest {
     }
 
     @DataProvider
-    public static Object[][] provider() {
+    static Object[][] provider() {
         return new Object[][] {
                 {unicast_props},
                 {unicast2_props}
@@ -128,9 +133,7 @@ public class UNICAST_ContentionTest {
     private static long getNumberOfRetransmissions(JChannel ch) {
         Protocol prot=ch.getProtocolStack().findProtocol(UNICAST.class, UNICAST2.class);
         if(prot instanceof UNICAST)
-            return ((UNICAST)prot).getNumberOfRetransmissions();
-        if(prot instanceof UNICAST2)
-            return ((UNICAST2)prot).getNumberOfRetransmissions();
+            return ((UNICAST)prot).getNumXmits();
         return -1;
     }
 

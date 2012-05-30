@@ -16,7 +16,7 @@ import java.util.Map;
  * 
  * @author Bela Ban
  */
-public class UUID implements Address, Streamable, Comparable<Address>, Externalizable {
+public class UUID implements Address {
     private static final long serialVersionUID=-6194072960039354716L;
     protected long   mostSigBits;
     protected long   leastSigBits;
@@ -53,7 +53,7 @@ public class UUID implements Address, Streamable, Comparable<Address>, Externali
         }
 
         try {
-            tmp=Util.getProperty(new String[]{Global.UUID_CACHE_MAX_AGE}, null, null, false, "5000");
+            tmp=Util.getProperty(new String[]{Global.UUID_CACHE_MAX_AGE}, null, null, false, "120000");
             if(tmp != null)
                 max_age=Long.valueOf(tmp);
         }

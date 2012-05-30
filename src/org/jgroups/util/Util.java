@@ -7,7 +7,6 @@ import org.jgroups.blocks.Connection;
 import org.jgroups.conf.ClassConfigurator;
 import org.jgroups.jmx.JmxConfigurator;
 import org.jgroups.logging.Log;
-import org.jgroups.logging.LogFactory;
 import org.jgroups.protocols.*;
 import org.jgroups.protocols.pbcast.FLUSH;
 import org.jgroups.protocols.pbcast.GMS;
@@ -78,22 +77,7 @@ public class Util {
      * reduces the amount of log data */
     public static int MAX_LIST_PRINT_SIZE=20;
 
-    /**
-     * Global thread group to which all (most!) JGroups threads belong
-     */
-    private static ThreadGroup GLOBAL_GROUP=new ThreadGroup("JGroups") {
-        public void uncaughtException(Thread t, Throwable e) {
-            LogFactory.getLog("org.jgroups").error("uncaught exception in " + t + " (thread group=" + GLOBAL_GROUP + " )", e);
-            final ThreadGroup tgParent = getParent();
-            if(tgParent != null) {
-                tgParent.uncaughtException(t,e);
-            }
-        }
-    };
-
-    public static ThreadGroup getGlobalThreadGroup() {
-        return GLOBAL_GROUP;
-    }
+    
 
     public static enum AddressScope {GLOBAL, SITE_LOCAL, LINK_LOCAL, LOOPBACK, NON_LOOPBACK};
 
@@ -212,6 +196,11 @@ public class Util {
     }
 
 
+    public static String bold(String msg) {
+        StringBuilder sb=new StringBuilder("\033[1m");
+        sb.append(msg).append("\033[0m");
+        return sb.toString();
+    }
 
 
     /**

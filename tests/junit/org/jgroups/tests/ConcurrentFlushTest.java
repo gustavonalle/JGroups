@@ -20,11 +20,11 @@ public class ConcurrentFlushTest extends ChannelTestBase {
     JChannel c1, c2, c3;
 
     @AfterMethod
-    public void tearDown() throws Exception {
+    void tearDown() throws Exception {
         Util.close(c3, c2, c1);
     }
 
-    public boolean useBlocking() {
+    protected boolean useBlocking() {
         return true;
     }
 

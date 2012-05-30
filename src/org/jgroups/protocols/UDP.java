@@ -221,8 +221,14 @@ public class UDP extends TP {
      * Creates the unicast and multicast sockets and starts the unicast and multicast receiver threads
      */
     public void start() throws Exception {
-        createSockets();
-        super.start();
+        try {
+            createSockets();
+            super.start();
+        }
+        catch(Exception ex) {
+            destroySockets();
+            throw ex;
+        }
         ucast_receiver=new PacketReceiver(sock,
                                           "unicast receiver",
                                           new Runnable() {
@@ -341,9 +347,9 @@ public class UDP extends TP {
             // https://jira.jboss.org/jira/browse/JGRP-777 - this doesn't work on MacOS, and we don't have
             // cross talking on Windows anyway, so we just do it for Linux. (How about Solaris ?)
             if(can_bind_to_mcast_addr)
-                mcast_sock=Util.createMulticastSocket(getSocketFactory(), Global.UDP_MCAST_SOCK, mcast_group_addr, mcast_port, log);
+                mcast_sock=Util.createMulticastSocket(getSocketFactory(), "jgroups.udp.mcast_sock", mcast_group_addr, mcast_port, log);
             else
-                mcast_sock=getSocketFactory().createMulticastSocket(Global.UDP_MCAST_SOCK, mcast_port);
+                mcast_sock=getSocketFactory().createMulticastSocket("jgroups.udp.mcast_sock", mcast_port);
 
             if(disable_loopback)
                 mcast_sock.setLoopbackMode(disable_loopback);
@@ -353,12 +359,9 @@ public class UDP extends TP {
             mcast_addr=new IpAddress(mcast_group_addr, mcast_port);
 
             // check that we're not using the same mcast address and port as the diagnostics socket
-            if(enable_diagnostics) {
-                if(diagnostics_addr != null && diagnostics_addr.equals(mcast_group_addr) ||
-                        diagnostics_port == mcast_port)
-                    throw new IllegalArgumentException("diagnostics_addr / diagnostics_port and mcast_addr / mcast_port " +
-                            "have to be different");
-            }
+            if(enable_diagnostics && diagnostics_addr.equals(mcast_group_addr) && diagnostics_port == mcast_port)
+                throw new IllegalArgumentException("diagnostics_addr:diagnostics_port and mcast_addr:mcast_port " +
+                                                     "have to be different");
 
             if(tos > 0) {
                 try {
@@ -397,7 +400,12 @@ public class UDP extends TP {
     protected IpAddress createLocalAddress() {
         if(sock == null || sock.isClosed())
             return null;
-        return new IpAddress(external_addr != null? external_addr : sock.getLocalAddress(), sock.getLocalPort());
+        if(external_addr != null) {
+            if(external_port > 0)
+                return new IpAddress(external_addr, external_port);
+            return new IpAddress(external_addr, sock.getLocalPort());
+        }
+        return new IpAddress(sock.getLocalAddress(), sock.getLocalPort());
     }
 
 
@@ -440,7 +448,7 @@ public class UDP extends TP {
         int localPort=0;
         while(true) {
             try {
-                tmp=getSocketFactory().createDatagramSocket(Global.UDP_UCAST_SOCK, localPort, bind_addr);
+                tmp=getSocketFactory().createDatagramSocket("jgroups.udp.unicast_sock", localPort, bind_addr);
             }
             catch(SocketException socket_ex) {
                 // Vladimir May 30th 2007
@@ -469,7 +477,7 @@ public class UDP extends TP {
         int rcv_port=bind_port, max_port=bind_port + port_range;
         while(rcv_port <= max_port) {
             try {
-                tmp=getSocketFactory().createDatagramSocket(Global.UDP_UCAST_SOCK, rcv_port, bind_addr);
+                tmp=getSocketFactory().createDatagramSocket("jgroups.udp.unicast_sock", rcv_port, bind_addr);
                 return tmp;
             }
             catch(SocketException bind_ex) {	// Cannot listen on this port

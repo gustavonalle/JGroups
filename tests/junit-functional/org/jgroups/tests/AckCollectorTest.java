@@ -61,7 +61,7 @@ public class AckCollectorTest {
             }
         }.start();
         try {
-            ac.waitForAllAcks(5000);
+            ac.waitForAllAcks(30000);
             assert true : "we should not get a timeout exception here";
         }
         catch(TimeoutException e) {
@@ -130,7 +130,7 @@ public class AckCollectorTest {
             }
         }.start();
         System.out.println("initial AckCollector: " + ac);
-        ac.waitForAllAcks(5000);
+        ac.waitForAllAcks(30000);
         System.out.println("new AckCollector: " + ac);
     }
 
@@ -141,6 +141,23 @@ public class AckCollectorTest {
         assert ac.size() == 5;
         ac.reset(tmp_list);
         assert ac.size() == 5;
+    }
+
+    public void testDestroy() {
+        List<Address> tmp_list=Arrays.asList(one,two,one,three,four,one,five);
+        final AckCollector ac=new AckCollector(tmp_list);
+        System.out.println("ac = " + ac);
+        assert ac.size() == 5;
+        Thread thread=new Thread() {
+            public void run() {
+                Util.sleep(2000);
+                ac.destroy();
+            }
+        };
+        thread.start();
+        boolean result=ac.waitForAllAcks(10000);
+        System.out.println("result = " + result);
+        assert !result;
     }
 
     public static void testNullList() throws TimeoutException {
@@ -183,7 +200,7 @@ public class AckCollectorTest {
             }
         }.start();
 
-        boolean received_all=ac.waitForAllAcks(5000);
+        boolean received_all=ac.waitForAllAcks(30000);
         System.out.println("ac = " + ac);
         assert received_all;
     }
@@ -204,7 +221,7 @@ public class AckCollectorTest {
             }
         }.start();
 
-        boolean received_all=ac.waitForAllAcks(5000);
+        boolean received_all=ac.waitForAllAcks(30000);
         System.out.println("ac = " + ac);
         assert received_all;
     }

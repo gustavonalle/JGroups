@@ -30,7 +30,7 @@ public class ENCRYPTAsymmetricTest {
     static final short ENCRYPT_ID=ClassConfigurator.getProtocolId(ENCRYPT.class);
 
     @BeforeClass
-    public static void initProvider() {
+    static void initProvider() {
         Security.addProvider(new org.bouncycastle.jce.provider.BouncyCastleProvider());
     }
 
@@ -492,6 +492,12 @@ public class ENCRYPTAsymmetricTest {
         public boolean equals(Object obj) {
             MockAddress address=(MockAddress)obj;
             return address.name.equals(this.name);
+        }
+
+        public void readExternal(ObjectInput in) throws IOException, ClassNotFoundException {
+        }
+
+        public void writeExternal(ObjectOutput out) throws IOException {
         }
 
         public void writeTo(DataOutput out) throws Exception {

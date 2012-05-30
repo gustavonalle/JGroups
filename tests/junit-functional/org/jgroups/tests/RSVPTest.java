@@ -9,7 +9,7 @@ import org.jgroups.logging.Log;
 import org.jgroups.logging.LogFactory;
 import org.jgroups.protocols.*;
 import org.jgroups.protocols.pbcast.GMS;
-import org.jgroups.protocols.pbcast.NAKACK;
+import org.jgroups.protocols.pbcast.NAKACK2;
 import org.jgroups.stack.DiagnosticsHandler;
 import org.jgroups.stack.ProtocolStack;
 import org.jgroups.util.*;
@@ -31,8 +31,7 @@ import java.util.concurrent.TimeUnit;
  */
 @Test(groups=Global.FUNCTIONAL,sequential=true)
 public class RSVPTest {
-    static final int               NUM=5; // number of members
-
+    protected static final int     NUM=5; // number of members
     protected final JChannel[]     channels=new JChannel[NUM];
     protected final MyReceiver[]   receivers=new MyReceiver[NUM];
     protected MyDiagnosticsHandler handler;
@@ -46,7 +45,7 @@ public class RSVPTest {
         handler=new MyDiagnosticsHandler(InetAddress.getByName("224.0.75.75"), 7500,
                                          LogFactory.getLog(DiagnosticsHandler.class),
                                          new DefaultSocketFactory(),
-                                         new DefaultThreadFactory(Util.getGlobalThreadGroup(), "", false));
+                                         new DefaultThreadFactory(new ThreadGroup("RSVPTest"), "", false));
         handler.start();
         
         ThreadGroup test_group=new ThreadGroup("LargeMergeTest");
@@ -79,13 +78,14 @@ public class RSVPTest {
                                            new DISCARD(),
                                            new PING().setValue("timeout",1000).setValue("num_initial_members",NUM)
                                              .setValue("force_sending_discovery_rsps", true),
-                                           new NAKACK().setValue("use_mcast_xmit",false)
+                                           new MERGE2().setValue("min_interval", 1000).setValue("max_interval", 3000),
+                                           new NAKACK2().setValue("use_mcast_xmit",false)
                                              .setValue("discard_delivered_msgs",true)
                                              .setValue("log_discard_msgs",false).setValue("log_not_found_msgs",false)
                                              .setValue("xmit_table_num_rows",5)
                                              .setValue("xmit_table_msgs_per_row",10),
                                            // new UNICAST(),
-                                           new UNICAST2().setValue("xmit_table_num_rows",5).setValue("exponential_backoff", 300)
+                                           new UNICAST2().setValue("xmit_table_num_rows",5).setValue("xmit_interval", 300)
                                              .setValue("xmit_table_msgs_per_row",10)
                                              .setValue("conn_expiry_timeout", 10000)
                                              .setValue("stable_interval", 30000)
@@ -103,7 +103,10 @@ public class RSVPTest {
             JmxConfigurator.registerChannel(channels[i], server, "channel-" + (i+1), "RSVPTest", true);
             channels[i].connect("RSVPTest");
             System.out.print(i + 1 + " ");
+            if(i == 0)
+                Util.sleep(2000);
         }
+        Util.waitUntilAllChannelsHaveSameSize(30000, 1000, channels);
         System.out.println("");
     }
 

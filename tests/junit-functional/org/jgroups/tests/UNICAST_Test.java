@@ -4,7 +4,7 @@ package org.jgroups.tests;
 import org.jgroups.*;
 import org.jgroups.protocols.*;
 import org.jgroups.protocols.pbcast.GMS;
-import org.jgroups.protocols.pbcast.NAKACK;
+import org.jgroups.protocols.pbcast.NAKACK2;
 import org.jgroups.protocols.pbcast.STABLE;
 import org.jgroups.stack.Protocol;
 import org.jgroups.stack.ProtocolStack;
@@ -20,7 +20,6 @@ import java.nio.ByteBuffer;
 /**
  * Tests the UNICAST protocol
  * @author Bela Ban
- * @version $id$
  */
 @Test(groups=Global.FUNCTIONAL,sequential=true)
 public class UNICAST_Test {
@@ -56,16 +55,11 @@ public class UNICAST_Test {
     }
 
     @DataProvider
-    public static Object[][] configProvider() {
-        Object[][] retval=new Object[][] {
-                {new UNICAST()}, {new UNICAST2()}
+    static Object[][] configProvider() {
+        return new Object[][]{
+          {new UNICAST()},{new UNICAST2()}
         };
-
-        ((UNICAST)retval[0][0]).setTimeout(new int[]{500,1000,2000,3000});
-        ((UNICAST2)retval[1][0]).setTimeout(new int[]{500,1000,2000,3000});
-        return retval;
     }
-
 
 
     private static byte[] createPayload(int size, int seqno) {
@@ -84,7 +78,7 @@ public class UNICAST_Test {
             stack.addProtocol(discard);
         
         stack.addProtocol(new PING())
-          .addProtocol(new NAKACK().setValue("use_mcast_xmit", false))
+          .addProtocol(new NAKACK2().setValue("use_mcast_xmit", false))
           .addProtocol(unicast)
           .addProtocol(new STABLE().setValue("max_bytes", 50000))
           .addProtocol(new GMS().setValue("print_local_addr", false))

@@ -7,9 +7,7 @@ import org.jgroups.annotations.ManagedOperation;
 import org.jgroups.annotations.Property;
 import org.jgroups.conf.PropertyConverters;
 import org.jgroups.stack.*;
-import org.jgroups.util.AgeOutCache;
-import org.jgroups.util.TimeScheduler;
-import org.jgroups.util.Util;
+import org.jgroups.util.*;
 
 import java.io.DataInput;
 import java.io.DataOutput;
@@ -18,6 +16,7 @@ import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -34,96 +33,116 @@ import java.util.concurrent.locks.ReentrantLock;
  * @author Bela Ban
  */
 @MBean(description="Reliable unicast layer")
-public class UNICAST2 extends Protocol implements Retransmitter.RetransmitCommand, AgeOutCache.Handler<Address> {
+public class UNICAST2 extends Protocol implements AgeOutCache.Handler<Address> {
     public static final long DEFAULT_FIRST_SEQNO=Global.DEFAULT_FIRST_UNICAST_SEQNO;
 
 
     /* ------------------------------------------ Properties  ------------------------------------------ */
-    
-    private int[] timeout= { 400, 800, 1600, 3200 }; // for NakSenderWindow: max time to wait for missing acks
+    @Deprecated
+    protected int[]   timeout= {400, 800, 1600, 3200}; // for NakSenderWindow: max time to wait for missing acks
 
     /**
      * The first value (in milliseconds) to use in the exponential backoff
      * retransmission mechanism. Only enabled if the value is > 0
      */
-    @Property(description="The first value (in milliseconds) to use in the exponential backoff. Enabled if greater than 0")
-    private int exponential_backoff=300;
+    @Deprecated
+    @Property(description="The first value (in milliseconds) to use in the exponential backoff. Enabled if greater than 0",
+              deprecatedMessage="Not used anymore")
+    protected int     exponential_backoff=300;
 
 
     @Property(description="Max number of messages to be removed from a NakReceiverWindow. This property might " +
             "get removed anytime, so don't use it !")
-    private int max_msg_batch_size=50000;
+    protected int     max_msg_batch_size=500;
 
     @Property(description="Max number of bytes before a stability message is sent to the sender")
-    protected long max_bytes=10000000;
+    protected long    max_bytes=10000000;
 
     @Property(description="Max number of milliseconds before a stability message is sent to the sender(s)")
-    protected long stable_interval=60000L;
+    protected long    stable_interval=60000L;
 
     @Property(description="Max number of STABLE messages sent for the same highest_received seqno. A value < 1 is invalid")
-    protected int max_stable_msgs=5;
+    protected int     max_stable_msgs=5;
 
     @Property(description="Number of rows of the matrix in the retransmission table (only for experts)",writable=false)
-    int xmit_table_num_rows=5;
+    protected int     xmit_table_num_rows=100;
 
     @Property(description="Number of elements of a row of the matrix in the retransmission table (only for experts). " +
       "The capacity of the matrix is xmit_table_num_rows * xmit_table_msgs_per_row",writable=false)
-    int xmit_table_msgs_per_row=10000;
+    protected int     xmit_table_msgs_per_row=2000;
 
     @Property(description="Resize factor of the matrix in the retransmission table (only for experts)",writable=false)
-    double xmit_table_resize_factor=1.2;
+    protected double  xmit_table_resize_factor=1.2;
 
     @Property(description="Number of milliseconds after which the matrix in the retransmission table " +
       "is compacted (only for experts)",writable=false)
-    long xmit_table_max_compaction_time=10 * 60 * 1000;
+    protected long    xmit_table_max_compaction_time=10 * 60 * 1000;
 
+    @Deprecated
     @Property(description="If enabled, the removal of a message from the retransmission table causes an " +
-      "automatic purge (only for experts)",writable=false)
-    boolean xmit_table_automatic_purging=true;
+      "automatic purge (only for experts)",writable=false, deprecatedMessage="not used anymore")
+    protected boolean xmit_table_automatic_purging=true;
 
     @Property(description="Whether to use the old retransmitter which retransmits individual messages or the new one " +
       "which uses ranges of retransmitted messages. Default is true. Note that this property will be removed in 3.0; " +
       "it is only used to switch back to the old (and proven) retransmitter mechanism if issues occur")
-    private boolean use_range_based_retransmitter=true;
+    protected boolean use_range_based_retransmitter=true;
+
+    @Property(description="If true, trashes warnings about retransmission messages not found in the xmit_table (used for testing)")
+    protected boolean log_not_found_msgs=true;
 
     @Property(description="Time (in milliseconds) after which an idle incoming or outgoing connection is closed. The " +
       "connection will get re-established when used again. 0 disables connection reaping")
-    protected long conn_expiry_timeout=60000;
+    protected long    conn_expiry_timeout=60000;
+
+    @Property(description="Interval (in milliseconds) at which missing messages (from all retransmit buffers) " +
+      "are retransmitted")
+    protected long    xmit_interval=1000;
     /* --------------------------------------------- JMX  ---------------------------------------------- */
 
 
-    private long num_msgs_sent=0, num_msgs_received=0, num_bytes_sent=0, num_bytes_received=0, num_xmits=0;
+    @ManagedAttribute(description="Number of messages sent")
+    protected int num_messages_sent=0;
+
+    @ManagedAttribute(description="Number of messages received")
+    protected int num_messages_received=0;
 
 
     /* --------------------------------------------- Fields ------------------------------------------------ */
 
-    private final ConcurrentMap<Address,SenderEntry>   send_table=Util.createConcurrentMap();
-    private final ConcurrentMap<Address,ReceiverEntry> recv_table=Util.createConcurrentMap();
+    protected final ConcurrentMap<Address,SenderEntry>   send_table=Util.createConcurrentMap();
+    protected final ConcurrentMap<Address,ReceiverEntry> recv_table=Util.createConcurrentMap();
 
-    protected final ReentrantLock recv_table_lock=new ReentrantLock();
+    /** RetransmitTask running every xmit_interval ms */
+    protected Future<?>              xmit_task;
 
-    private final List<Address> members=new ArrayList<Address>(11);
+    protected final ReentrantLock    recv_table_lock=new ReentrantLock();
 
-    private Address local_addr=null;
+    protected volatile List<Address> members=new ArrayList<Address>(11);
 
-    private TimeScheduler timer=null; // used for retransmissions (passed to AckSenderWindow)
+    protected Address                local_addr=null;
 
-    private boolean started=false;
+    protected TimeScheduler          timer=null; // used for retransmissions (passed to AckSenderWindow)
 
-    private short last_conn_id=0;
+    protected volatile boolean       running=false;
 
-    protected long max_retransmit_time=60 * 1000L;
+    protected short                  last_conn_id=0;
 
-    private AgeOutCache<Address> cache=null;
+    protected long                   max_retransmit_time=60 * 1000L;
 
-    private Future<?> stable_task_future=null; // bcasts periodic STABLE message (added to timer below)
+    protected AgeOutCache<Address>   cache=null;
 
-    protected Future<?> connection_reaper; // closes idle connections
+    protected Future<?>              stable_task_future=null; // bcasts periodic STABLE message (added to timer below)
+
+    protected Future<?>              connection_reaper; // closes idle connections
+
 
 
     public int[] getTimeout() {return timeout;}
 
-    @Property(name="timeout",converter=PropertyConverters.IntegerArray.class,description="list of timeouts")
+    @Deprecated
+    @Property(name="timeout",converter=PropertyConverters.IntegerArray.class,
+              description="list of timeouts", deprecatedMessage="not used anymore")
     public void setTimeout(int[] val) {
         if(val != null)
             timeout=val;
@@ -138,7 +157,7 @@ public class UNICAST2 extends Protocol implements Retransmitter.RetransmitComman
     public String getLocalAddress() {return local_addr != null? local_addr.toString() : "null";}
 
     @ManagedAttribute
-    public String getMembers() {return members != null? members.toString() : "[]";}
+    public String getMembers() {return members.toString();}
 
 
     @ManagedAttribute(description="Returns the number of outgoing (send) connections")
@@ -179,40 +198,117 @@ public class UNICAST2 extends Protocol implements Retransmitter.RetransmitComman
     public boolean isConnectionReaperRunning() {return connection_reaper != null && !connection_reaper.isDone();}
 
 
-    @ManagedAttribute
-    public long getNumMessagesSent() {
-        return num_msgs_sent;
-    }
-
-    @ManagedAttribute
-    public long getNumMessagesReceived() {
-        return num_msgs_received;
-    }
-
-    @ManagedAttribute
-    public long getNumBytesSent() {
-        return num_bytes_sent;
-    }
-
-    @ManagedAttribute
-    public long getNumBytesReceived() {
-        return num_bytes_received;
-    }
-
-    @ManagedAttribute
-    public long getNumberOfRetransmissions() {
-        return num_xmits;
-    }
-
-    @ManagedAttribute
-    public long getPendingXmitRequests() {
+    @ManagedAttribute(description="Total number of undelivered messages in all receive windows")
+    public long getXmitTableUndeliveredMessages() {
         long retval=0;
-        Collection<ReceiverEntry> values=recv_table.values();
-        for(ReceiverEntry entry: values)
-        if(entry.received_msgs != null)
-            retval+=entry.received_msgs.getPendingXmits();
+        for(ReceiverEntry entry: recv_table.values()) {
+            if(entry.received_msgs != null)
+                retval+=entry.received_msgs.size();
+        }
         return retval;
     }
+
+    @ManagedAttribute(description="Total number of missing messages in all receive windows")
+    public long getXmitTableMissingMessages() {
+        long retval=0;
+        for(ReceiverEntry entry: recv_table.values()) {
+            if(entry.received_msgs != null)
+                retval+=entry.received_msgs.getNumMissing();
+        }
+        return retval;
+    }
+
+    @ManagedAttribute(description="Number of compactions in all (receive and send) windows")
+    public int getXmitTableNumCompactions() {
+        int retval=0;
+        for(ReceiverEntry entry: recv_table.values()) {
+            if(entry.received_msgs != null)
+                retval+=entry.received_msgs.getNumCompactions();
+        }
+        for(SenderEntry entry: send_table.values()) {
+            if(entry.sent_msgs != null)
+                retval+=entry.sent_msgs.getNumCompactions();
+        }
+        return retval;
+    }
+
+    @ManagedAttribute(description="Number of moves in all (receive and send) windows")
+    public int getXmitTableNumMoves() {
+        int retval=0;
+        for(ReceiverEntry entry: recv_table.values()) {
+            if(entry.received_msgs != null)
+                retval+=entry.received_msgs.getNumMoves();
+        }
+        for(SenderEntry entry: send_table.values()) {
+            if(entry.sent_msgs != null)
+                retval+=entry.sent_msgs.getNumMoves();
+        }
+        return retval;
+    }
+
+    @ManagedAttribute(description="Number of resizes in all (receive and send) windows")
+    public int getXmitTableNumResizes() {
+        int retval=0;
+        for(ReceiverEntry entry: recv_table.values()) {
+            if(entry.received_msgs != null)
+                retval+=entry.received_msgs.getNumResizes();
+        }
+        for(SenderEntry entry: send_table.values()) {
+            if(entry.sent_msgs != null)
+                retval+=entry.sent_msgs.getNumResizes();
+        }
+        return retval;
+    }
+
+    @ManagedAttribute(description="Number of purges in all (receive and send) windows")
+    public int getXmitTableNumPurges() {
+        int retval=0;
+        for(ReceiverEntry entry: recv_table.values()) {
+            if(entry.received_msgs != null)
+                retval+=entry.received_msgs.getNumPurges();
+        }
+        for(SenderEntry entry: send_table.values()) {
+            if(entry.sent_msgs != null)
+                retval+=entry.sent_msgs.getNumPurges();
+        }
+        return retval;
+    }
+
+    @ManagedOperation(description="Prints the contents of the receive windows for all members")
+    public String printReceiveWindowMessages() {
+        StringBuilder ret=new StringBuilder(local_addr + ":\n");
+        for(Map.Entry<Address,ReceiverEntry> entry: recv_table.entrySet()) {
+            Address addr=entry.getKey();
+            Table<Message> buf=entry.getValue().received_msgs;
+            ret.append(addr).append(": ").append(buf.toString()).append('\n');
+        }
+        return ret.toString();
+    }
+
+    @ManagedOperation(description="Prints the contents of the send windows for all members")
+    public String printSendWindowMessages() {
+        StringBuilder ret=new StringBuilder(local_addr + ":\n");
+        for(Map.Entry<Address,SenderEntry> entry: send_table.entrySet()) {
+            Address addr=entry.getKey();
+            Table<Message> buf=entry.getValue().sent_msgs;
+            ret.append(addr).append(": ").append(buf.toString()).append('\n');
+        }
+        return ret.toString();
+    }
+
+
+
+    @ManagedAttribute(description="Number of retransmit requests received")
+    protected final AtomicLong xmit_reqs_received=new AtomicLong(0);
+
+    @ManagedAttribute(description="Number of retransmit requests sent")
+    protected final AtomicLong xmit_reqs_sent=new AtomicLong(0);
+
+    @ManagedAttribute(description="Number of retransmit responses sent")
+    protected final AtomicLong xmit_rsps_sent=new AtomicLong(0);
+
+    @ManagedAttribute(description="Is the retransmit task running")
+    public boolean isXmitTaskRunning() {return xmit_task != null && !xmit_task.isDone();}
 
     public long getMaxRetransmitTime() {
         return max_retransmit_time;
@@ -240,62 +336,13 @@ public class UNICAST2 extends Protocol implements Retransmitter.RetransmitComman
         return cache;
     }
 
-    @ManagedAttribute
-    public int getNumberOfMessagesInReceiveWindows() {
-        int num=0;
-        for(ReceiverEntry entry: recv_table.values()) {
-            if(entry.received_msgs != null)
-                num+=entry.received_msgs.size();
-        }
-        return num;
-    }
-
-
-    @ManagedOperation(description="Returns the sizes of all NakReceiverWindow.RetransmitTables")
-    public String printRetransmitTableSizes() {
-        StringBuilder sb=new StringBuilder();
-        for(Map.Entry<Address,ReceiverEntry> entry: recv_table.entrySet()) {
-            NakReceiverWindow win=entry.getValue().received_msgs;
-            sb.append(entry.getKey() + ": ").append(win.getRetransmitTableSize())
-              .append(" (capacity=" + win.getRetransmitTableCapacity())
-              .append(", fill factor=" + win.getRetransmitTableFillFactor() + "%)\n");
-        }
-        return sb.toString();
-    }
-
-
-    @ManagedOperation(description="Compacts the retransmission tables")
-    public void compact() {
-        for(Map.Entry<Address,ReceiverEntry> entry: recv_table.entrySet()) {
-            NakReceiverWindow win=entry.getValue().received_msgs;
-            win.compact();
-        }
-    }
-
-    @ManagedOperation(description="Purges highes delivered messages and compacts the retransmission tables")
-    public void purgeAndCompact() {
-        for(Map.Entry<Address,ReceiverEntry> entry: recv_table.entrySet()) {
-            NakReceiverWindow win=entry.getValue().received_msgs;
-            win.stable(win.getHighestDelivered());
-            win.compact();
-        }
-    }
 
 
     public void resetStats() {
-        num_msgs_sent=num_msgs_received=num_bytes_sent=num_bytes_received=num_xmits=0;
-    }
-
-
-    public Map<String, Object> dumpStats() {
-        Map<String, Object> m=super.dumpStats();
-        m.put("num_msgs_sent", num_msgs_sent);
-        m.put("num_msgs_received", num_msgs_received);
-        m.put("num_bytes_sent", num_bytes_sent);
-        m.put("num_bytes_received", num_bytes_received);
-        m.put("num_xmits", num_xmits);
-        m.put("num_msgs_in_recv_windows", getNumberOfMessagesInReceiveWindows());
-        return m;
+        num_messages_sent=num_messages_received=0;
+        xmit_reqs_received.set(0);
+        xmit_reqs_sent.set(0);
+        xmit_rsps_sent.set(0);
     }
 
 
@@ -325,17 +372,19 @@ public class UNICAST2 extends Protocol implements Retransmitter.RetransmitComman
             throw new Exception("timer is null");
         if(max_retransmit_time > 0)
             cache=new AgeOutCache<Address>(timer, max_retransmit_time, this);
-        started=true;
+        running=true;
         if(stable_interval > 0)
             startStableTask();
         if(conn_expiry_timeout > 0)
             startConnectionReaper();
+        startRetransmitTask();
     }
 
     public void stop() {
-        started=false;
+        running=false;
         stopStableTask();
         stopConnectionReaper();
+        stopRetransmitTask();
         removeAllConnections();
     }
 
@@ -365,7 +414,7 @@ public class UNICAST2 extends Protocol implements Retransmitter.RetransmitComman
                         handleDataReceived(src, hdr.seqno, hdr.conn_id, hdr.first, msg, evt);
                         return null; // we pass the deliverable message up in handleDataReceived()
                     case Unicast2Header.XMIT_REQ:  // received ACK for previously sent message
-                        handleXmitRequest(src, hdr.seqno, hdr.high_seqno);
+                        handleXmitRequest(src, (SeqnoList)msg.getObject());
                         break;
                     case Unicast2Header.SEND_FIRST_SEQNO:
                         handleResendingOfFirstMessage(src, hdr.seqno);
@@ -396,7 +445,7 @@ public class UNICAST2 extends Protocol implements Retransmitter.RetransmitComman
                 if (dst == null || msg.isFlagSet(Message.NO_RELIABILITY))
                     break;
 
-                if(!started) {
+                if(!running) {
                     if(log.isTraceEnabled())
                         log.trace("discarded message as start() has not yet been called, message: " + msg);
                     return null;
@@ -416,37 +465,39 @@ public class UNICAST2 extends Protocol implements Retransmitter.RetransmitComman
                     }
                 }
 
-                long seqno=-2;
-                short send_conn_id=-1;
-                Unicast2Header hdr;
-
-                entry.lock(); // threads will only sync if they access the same entry
-                try {
-                    seqno=entry.sent_msgs_seqno;
-                    send_conn_id=entry.send_conn_id;
-                    hdr=Unicast2Header.createDataHeader(seqno, send_conn_id, seqno == DEFAULT_FIRST_SEQNO);
-                    msg.putHeader(this.id, hdr);
-                    entry.sent_msgs.addToMessages(seqno, msg);  // add *including* UnicastHeader, adds to retransmitter
-                    entry.sent_msgs_seqno++;
-                    entry.update();
-                }
-                finally {
-                    entry.unlock();
+                short send_conn_id=entry.send_conn_id;
+                long seqno=entry.sent_msgs_seqno.getAndIncrement();
+                long sleep=10;
+                while(running) {
+                    try {
+                        msg.putHeader(this.id, Unicast2Header.createDataHeader(seqno,send_conn_id,seqno == DEFAULT_FIRST_SEQNO));
+                        entry.sent_msgs.add(seqno,msg);  // add *including* UnicastHeader, adds to retransmitter
+                        if(conn_expiry_timeout > 0)
+                            entry.update();
+                        break;
+                    }
+                    catch(Throwable t) {
+                        if(!running)
+                            break;
+                        if(log.isWarnEnabled())
+                            log.warn("failed sending message", t);
+                        Util.sleep(sleep);
+                        sleep=Math.min(5000, sleep*2);
+                    }
                 }
 
                 if(log.isTraceEnabled()) {
                     StringBuilder sb=new StringBuilder();
                     sb.append(local_addr).append(" --> DATA(").append(dst).append(": #").append(seqno).
                             append(", conn_id=").append(send_conn_id);
-                    if(hdr.first) sb.append(", first");
+                    if(seqno == DEFAULT_FIRST_SEQNO) sb.append(", first");
                     sb.append(')');
                     log.trace(sb);
                 }
 
                 try {
                     down_prot.down(evt);
-                    num_msgs_sent++;
-                    num_bytes_sent+=msg.getLength();
+                    num_messages_sent++;
                 }
                 catch(Throwable t) {
                     log.warn("failed sending the message", t);
@@ -459,15 +510,10 @@ public class UNICAST2 extends Protocol implements Retransmitter.RetransmitComman
                 Set<Address> non_members=new HashSet<Address>(send_table.keySet());
                 non_members.addAll(recv_table.keySet());
 
-                synchronized(members) {
-                    members.clear();
-                    if(new_members != null)
-                        members.addAll(new_members);
-                    non_members.removeAll(members);
-                    if(cache != null) {
-                        cache.removeAll(members);
-                    }
-                }
+                members=new_members;
+                non_members.removeAll(new_members);
+                if(cache != null)
+                    cache.removeAll(new_members);
 
                 if(!non_members.isEmpty()) {
                     if(log.isTraceEnabled())
@@ -489,30 +535,30 @@ public class UNICAST2 extends Protocol implements Retransmitter.RetransmitComman
      * Purge all messages in window for local_addr, which are <= low. Check if the window's highest received message is
      * > high: if true, retransmit all messages from high - win.high to sender
      * @param sender
-     * @param highest_delivered
-     * @param highest_seen
+     * @param hd Highest delivered seqno
+     * @param hr Highest received seqno
      */
-    protected void stable(Address sender, short conn_id, long highest_delivered, long highest_seen) {
+    protected void stable(Address sender, short conn_id, long hd, long hr) {
         SenderEntry entry=send_table.get(sender);
-        AckSenderWindow win=entry != null? entry.sent_msgs : null;
+        Table<Message> win=entry != null? entry.sent_msgs : null;
         if(win == null)
             return;
 
         if(log.isTraceEnabled())
             log.trace(new StringBuilder().append(local_addr).append(" <-- STABLE(").append(sender)
-                        .append(": ").append(highest_delivered).append("-")
-                        .append(highest_seen).append(", conn_id=" + conn_id) +")");
+                        .append(": ").append(hd).append("-")
+                        .append(hr).append(", conn_id=" + conn_id) +")");
 
         if(entry.send_conn_id != conn_id) {
-            log.warn(local_addr + ": my conn_id (" + entry.send_conn_id +
+            log.trace(local_addr + ": my conn_id (" + entry.send_conn_id +
                        ") != received conn_id (" + conn_id + "); discarding STABLE message !");
             return;
         }
 
-        win.ack(highest_delivered);
-        long win_high=win.getHighest();
-        if(win_high > highest_seen) {
-            for(long seqno=highest_seen; seqno <= win_high; seqno++) {
+        win.purge(hd,true);
+        long win_hr=win.getHighestReceived();
+        if(win_hr > hr) {
+            for(long seqno=hr; seqno <= win_hr; seqno++) {
                 Message msg=win.get(seqno); // destination is still the same (the member which sent the STABLE message)
                 if(msg != null)
                     down_prot.down(new Event(Event.MSG, msg));
@@ -526,13 +572,13 @@ public class UNICAST2 extends Protocol implements Retransmitter.RetransmitComman
         for(Map.Entry<Address,ReceiverEntry> entry: recv_table.entrySet()) {
             Address dest=entry.getKey();
             ReceiverEntry val=entry.getValue();
-            NakReceiverWindow win=val != null? val.received_msgs : null;
+            Table<Message> win=val != null? val.received_msgs : null;
             if(win != null) {
                 long[] tmp=win.getDigest();
                 long low=tmp[0], high=tmp[1];
 
                 if(val.last_highest == high) {
-                    if(val.num_stable_msgs >= val.max_stable_msgs) {
+                    if(val.num_stable_msgs >= max_stable_msgs) {
                         continue;
                     }
                     else
@@ -547,27 +593,22 @@ public class UNICAST2 extends Protocol implements Retransmitter.RetransmitComman
         }
     }
 
-    protected void sendStableMessage(Address dest, short conn_id, long low, long high) {
+    protected void sendStableMessage(Address dest, short conn_id, long hd, long hr) {
         Message stable_msg=new Message(dest, null, null);
-        Unicast2Header hdr=Unicast2Header.createStableHeader(conn_id, low, high);
+        Unicast2Header hdr=Unicast2Header.createStableHeader(conn_id, hd, hr);
         stable_msg.putHeader(this.id, hdr);
         stable_msg.setFlag(Message.OOB);
         if(log.isTraceEnabled()) {
             StringBuilder sb=new StringBuilder();
             sb.append(local_addr).append(" --> STABLE(").append(dest).append(": ")
-              .append(low).append("-").append(high).append(", conn_id=").append(conn_id).append(")");
+              .append(hd).append("-").append(hr).append(", conn_id=").append(conn_id).append(")");
             log.trace(sb.toString());
         }
         down_prot.down(new Event(Event.MSG, stable_msg));
-
-        ReceiverEntry entry=recv_table.get(dest);
-        NakReceiverWindow win=entry != null? entry.received_msgs : null;
-        if(win != null)
-            win.stable(win.getHighestDelivered());
     }
 
 
-    private void startStableTask() {
+    protected void startStableTask() {
         if(stable_task_future == null || stable_task_future.isDone()) {
             final Runnable stable_task=new Runnable() {
                 public void run() {
@@ -586,7 +627,7 @@ public class UNICAST2 extends Protocol implements Retransmitter.RetransmitComman
     }
 
 
-    private void stopStableTask() {
+    protected void stopStableTask() {
         if(stable_task_future != null) {
             stable_task_future.cancel(false);
             stable_task_future=null;
@@ -613,15 +654,13 @@ public class UNICAST2 extends Protocol implements Retransmitter.RetransmitComman
     }
 
     public void removeSendConnection(Address mbr) {
-        SenderEntry entry=send_table.remove(mbr);
-        if(entry != null)
-            entry.reset();
+        send_table.remove(mbr);
     }
 
     public void removeReceiveConnection(Address mbr) {
         ReceiverEntry entry2=recv_table.remove(mbr);
         if(entry2 != null) {
-            NakReceiverWindow win=entry2.received_msgs;
+            Table<Message> win=entry2.received_msgs;
             if(win != null)
                 sendStableMessage(mbr, entry2.recv_conn_id, win.getHighestDelivered(), win.getHighestReceived());
             entry2.reset();
@@ -634,10 +673,7 @@ public class UNICAST2 extends Protocol implements Retransmitter.RetransmitComman
      */
     @ManagedOperation(description="Trashes all connections to other nodes. This is only used for testing")
     public void removeAllConnections() {
-        for(SenderEntry entry: send_table.values())
-            entry.reset();
         send_table.clear();
-
         sendStableMessages();
         for(ReceiverEntry entry2: recv_table.values())
             entry2.reset();
@@ -645,13 +681,15 @@ public class UNICAST2 extends Protocol implements Retransmitter.RetransmitComman
     }
 
 
-    public void retransmit(long first_seqno, long last_seqno, Address sender) {
-        if(last_seqno < first_seqno)
-            return;
-        Unicast2Header hdr=Unicast2Header.createXmitReqHeader(first_seqno, last_seqno);
-        Message xmit_req=new Message(sender, null, null);
-        xmit_req.putHeader(this.id, hdr);
-        down_prot.down(new Event(Event.MSG,xmit_req));
+    public void retransmit(SeqnoList missing, Address sender) {
+        Unicast2Header hdr=Unicast2Header.createXmitReqHeader();
+        Message retransmit_msg=new Message(sender, null, missing);
+        retransmit_msg.setFlag(Message.OOB);
+        if(log.isTraceEnabled())
+            log.trace(local_addr + ": sending XMIT_REQ (" + missing + ") to " + sender);
+        retransmit_msg.putHeader(this.id, hdr);
+        down_prot.down(new Event(Event.MSG,retransmit_msg));
+        xmit_reqs_sent.addAndGet(missing.size());
     }
 
     
@@ -670,7 +708,7 @@ public class UNICAST2 extends Protocol implements Retransmitter.RetransmitComman
 
 
     /**
-     * Check whether the hashtable contains an entry e for <code>sender</code> (create if not). If
+     * Check whether the hashmap contains an entry e for <code>sender</code> (create if not). If
      * e.received_msgs is null and <code>first</code> is true: create a new AckReceiverWindow(seqno) and
      * add message. Set e.received_msgs to the new window. Else just add the message.
      */
@@ -683,73 +721,20 @@ public class UNICAST2 extends Protocol implements Retransmitter.RetransmitComman
             sb.append(')');
             log.trace(sb);
         }
-
-        ReceiverEntry entry;
-        NakReceiverWindow win;
-
-        recv_table_lock.lock();
-        try {
-            entry=recv_table.get(sender);
-            win=entry != null? entry.received_msgs : null;
-            if(first) {
-                if(entry == null) {
-                    entry=getOrCreateReceiverEntry(sender, seqno, conn_id);
-                    win=entry.received_msgs;
-                }
-                else {  // entry != null && win != null
-                    if(conn_id != entry.recv_conn_id) {
-                        if(log.isTraceEnabled())
-                            log.trace(local_addr + ": conn_id=" + conn_id + " != " + entry.recv_conn_id + "; resetting receiver window");
-
-                        ReceiverEntry entry2=recv_table.remove(sender);
-                        if(entry2 != null)
-                            entry2.received_msgs.destroy();
-
-                        entry=getOrCreateReceiverEntry(sender, seqno, conn_id);
-                        win=entry.received_msgs;
-                    }
-                    else {
-                        ;
-                    }
-                }
-            }
-            else { // entry == null && win == null OR entry != null && win == null OR entry != null && win != null
-                if(win == null || entry.recv_conn_id != conn_id) {
-                    recv_table_lock.unlock();
-                    sendRequestForFirstSeqno(sender, seqno); // drops the message and returns (see below)
-                    return;
-                }
-            }
-        }
-        finally {
-            if(recv_table_lock.isHeldByCurrentThread())
-                recv_table_lock.unlock();
-        }
-
-        entry.update();
+        
+        ReceiverEntry entry=getReceiverEntry(sender, seqno, first, conn_id);
+        if(entry == null)
+            return;
+        if(conn_expiry_timeout > 0)
+            entry.update();
+        Table<Message> win=entry.received_msgs;
         boolean added=win.add(seqno, msg); // win is guaranteed to be non-null if we get here
-        num_msgs_received++;
-        num_bytes_received+=msg.getLength();
+        num_messages_received++;
 
         if(added) {
             int len=msg.getLength();
-            if(len > 0) {
-                boolean send_stable_msg=false;
-                entry.lock();
-                try {
-                    entry.received_bytes+=len;
-                    if(entry.received_bytes >= max_bytes) {
-                        entry.received_bytes=0;
-                        send_stable_msg=true;
-                    }
-                }
-                finally {
-                    entry.unlock();
-                }
-
-                if(send_stable_msg)
-                    sendStableMessage(sender, entry.recv_conn_id, win.getHighestDelivered(), win.getHighestReceived());
-            }
+            if(len > 0 &&  entry.incrementStable(len))
+                sendStableMessage(sender, entry.recv_conn_id, win.getHighestDelivered(), win.getHighestReceived());
         }
 
         // An OOB message is passed up immediately. Later, when remove() is called, we discard it. This affects ordering !
@@ -768,8 +753,7 @@ public class UNICAST2 extends Protocol implements Retransmitter.RetransmitComman
             return;
         }
 
-        // try to remove (from the AckReceiverWindow) as many messages as possible and pass them up
-
+        // Try to remove as many messages as possible and pass them up.
         // Prevents concurrent passing up of messages by different threads (http://jira.jboss.com/jira/browse/JGRP-198);
         // this is all the more important once we have a concurrent stack (http://jira.jboss.com/jira/browse/JGRP-181),
         // where lots of threads can come up to this point concurrently, but only 1 is allowed to pass at a time
@@ -807,18 +791,51 @@ public class UNICAST2 extends Protocol implements Retransmitter.RetransmitComman
     }
 
 
-    private ReceiverEntry getOrCreateReceiverEntry(Address sender, long seqno, short conn_id) {
-        NakReceiverWindow win=new NakReceiverWindow(sender, this, seqno-1, timer, use_range_based_retransmitter,
-                                                    xmit_table_num_rows, xmit_table_msgs_per_row,
-                                                    xmit_table_resize_factor, xmit_table_max_compaction_time,
-                                                    xmit_table_automatic_purging);
+    protected ReceiverEntry getReceiverEntry(Address sender, long seqno, boolean first, short conn_id) {
+        ReceiverEntry entry=recv_table.get(sender);
+        if(entry != null && entry.recv_conn_id == conn_id)
+            return entry;
 
-        if(exponential_backoff > 0)
-            win.setRetransmitTimeouts(new ExponentialInterval(exponential_backoff));
-        else
-            win.setRetransmitTimeouts(new StaticInterval(timeout));
+        recv_table_lock.lock();
+        try {
+            entry=recv_table.get(sender);
+            if(first) {
+                if(entry == null) {
+                    entry=getOrCreateReceiverEntry(sender, seqno, conn_id);
+                }
+                else {  // entry != null && win != null
+                    if(conn_id != entry.recv_conn_id) {
+                        if(log.isTraceEnabled())
+                            log.trace(local_addr + ": conn_id=" + conn_id + " != " + entry.recv_conn_id + "; resetting receiver window");
 
-        ReceiverEntry entry=new ReceiverEntry(win, conn_id, max_stable_msgs);
+                        recv_table.remove(sender);
+                        entry=getOrCreateReceiverEntry(sender, seqno, conn_id);
+                    }
+                    else {
+                        ;
+                    }
+                }
+            }
+            else { // entry == null && win == null OR entry != null && win == null OR entry != null && win != null
+                if(entry == null || entry.recv_conn_id != conn_id) {
+                    recv_table_lock.unlock();
+                    sendRequestForFirstSeqno(sender, seqno); // drops the message and returns (see below)
+                    return null;
+                }
+            }
+            return entry;
+        }
+        finally {
+            if(recv_table_lock.isHeldByCurrentThread())
+                recv_table_lock.unlock();
+        }
+    }
+
+
+    protected ReceiverEntry getOrCreateReceiverEntry(Address sender, long seqno, short conn_id) {
+        Table<Message> table=new Table<Message>(xmit_table_num_rows, xmit_table_msgs_per_row, seqno-1,
+                                                xmit_table_resize_factor, xmit_table_max_compaction_time);
+        ReceiverEntry entry=new ReceiverEntry(table, conn_id);
         ReceiverEntry entry2=recv_table.putIfAbsent(sender, entry);
         if(entry2 != null)
             return entry2;
@@ -828,21 +845,22 @@ public class UNICAST2 extends Protocol implements Retransmitter.RetransmitComman
     }
 
 
-    private void handleXmitRequest(Address sender, long low, long high) {
+    protected void handleXmitRequest(Address sender, SeqnoList missing) {
         if(log.isTraceEnabled())
             log.trace(new StringBuilder().append(local_addr).append(" <-- XMIT(").append(sender).
-                    append(": #").append(low).append( "-").append(high).append(')'));
+              append(": #").append(missing).append(')'));
 
         SenderEntry entry=send_table.get(sender);
-        AckSenderWindow win=entry != null? entry.sent_msgs : null;
+        xmit_reqs_received.addAndGet(missing.size());
+        Table<Message> win=entry != null? entry.sent_msgs : null;
         if(win != null) {
-            for(long i=low; i <= high; i++) {
-                Message msg=win.get(i);
+            for(long seqno: missing) {
+                Message msg=win.get(seqno);
                 if(msg == null) {
-                    if(log.isWarnEnabled() && !local_addr.equals(sender)) {
+                    if(log.isWarnEnabled() && log_not_found_msgs && !local_addr.equals(sender) && seqno > win.getLow()) {
                         StringBuilder sb=new StringBuilder();
                         sb.append("(requester=").append(sender).append(", local_addr=").append(this.local_addr);
-                        sb.append(") message ").append(sender).append("::").append(i);
+                        sb.append(") message ").append(sender).append("::").append(seqno);
                         sb.append(" not found in retransmission table of ").append(sender).append(":\n").append(win);
                         log.warn(sb.toString());
                     }
@@ -850,7 +868,7 @@ public class UNICAST2 extends Protocol implements Retransmitter.RetransmitComman
                 }
                 
                 down_prot.down(new Event(Event.MSG, msg));
-                num_xmits++;
+                xmit_rsps_sent.incrementAndGet();
             }
         }
     }
@@ -859,56 +877,57 @@ public class UNICAST2 extends Protocol implements Retransmitter.RetransmitComman
     /**
      * We need to resend our first message with our conn_id
      * @param sender
-     * @param seqno Resend messages in the range [lowest .. seqno]
+     * @param seqno Resend the non null messages in the range [lowest .. seqno]
      */
-    private void handleResendingOfFirstMessage(Address sender, long seqno) {
+    protected void handleResendingOfFirstMessage(Address sender, long seqno) {
         if(log.isTraceEnabled())
             log.trace(local_addr + " <-- SEND_FIRST_SEQNO(" + sender + "," + seqno + ")");
         SenderEntry entry=send_table.get(sender);
-        AckSenderWindow win=entry != null? entry.sent_msgs : null;
+        Table<Message> win=entry != null? entry.sent_msgs : null;
         if(win == null) {
-            if(log.isErrorEnabled())
-                log.error(local_addr + ": sender window for " + sender + " not found");
+            if(log.isTraceEnabled())
+                log.trace(local_addr + ": sender window for " + sender + " not found");
             return;
         }
-        long lowest=win.getLowest();
-        Message rsp=win.get(lowest);
-        if(rsp == null)
-            return;
 
-        // We need to copy the UnicastHeader and put it back into the message because Message.copy() doesn't copy
-        // the headers and therefore we'd modify the original message in the sender retransmission window
-        // (https://jira.jboss.org/jira/browse/JGRP-965)
-        Message copy=rsp.copy();
-        Unicast2Header hdr=(Unicast2Header)copy.getHeader(this.id);
-        Unicast2Header newhdr=hdr.copy();
-        newhdr.first=true;
-        copy.putHeader(this.id, newhdr);
-
-        if(log.isTraceEnabled()) {
-            StringBuilder sb=new StringBuilder();
-            sb.append(local_addr).append(" --> DATA(").append(copy.getDest()).append(": #").append(newhdr.seqno).
-                    append(", conn_id=").append(newhdr.conn_id);
-            if(newhdr.first) sb.append(", first");
-            sb.append(')');
-            log.trace(sb);
-        }
-        down_prot.down(new Event(Event.MSG, copy));
-
-        if(++lowest > seqno)
-            return;
-        for(long i=lowest; i <= seqno; i++) {
-            rsp=win.get(i);
-            if(rsp != null)
+        boolean first_sent=false;
+        for(long i=win.getLow() +1; i <= seqno; i++) {
+            Message rsp=win.get(i);
+            if(rsp == null)
+                continue;
+            if(first_sent) {
                 down_prot.down(new Event(Event.MSG, rsp));
+            }
+            else {
+                first_sent=true;
+                // We need to copy the UnicastHeader and put it back into the message because Message.copy() doesn't copy
+                // the headers and therefore we'd modify the original message in the sender retransmission window
+                // (https://jira.jboss.org/jira/browse/JGRP-965)
+                Message copy=rsp.copy();
+                Unicast2Header hdr=(Unicast2Header)copy.getHeader(this.id);
+                Unicast2Header newhdr=hdr.copy();
+                newhdr.first=true;
+                copy.putHeader(this.id, newhdr);
+                down_prot.down(new Event(Event.MSG, copy));
+            }
         }
     }
 
+    protected void startRetransmitTask() {
+        if(xmit_task == null || xmit_task.isDone())
+            xmit_task=timer.scheduleWithFixedDelay(new RetransmitTask(), 0, xmit_interval, TimeUnit.MILLISECONDS);
+    }
+
+    protected void stopRetransmitTask() {
+        if(xmit_task != null) {
+            xmit_task.cancel(true);
+            xmit_task=null;
+        }
+    }
+    
 
 
-
-
-    private synchronized short getNewConnectionId() {
+    protected synchronized short getNewConnectionId() {
         short retval=last_conn_id;
         if(last_conn_id >= Short.MAX_VALUE || last_conn_id < 0)
             last_conn_id=0;
@@ -917,7 +936,7 @@ public class UNICAST2 extends Protocol implements Retransmitter.RetransmitComman
         return retval;
     }
 
-    private void sendRequestForFirstSeqno(Address dest, long seqno_received) {
+    protected void sendRequestForFirstSeqno(Address dest, long seqno_received) {
         Message msg=new Message(dest);
         msg.setFlag(Message.OOB);
         Unicast2Header hdr=Unicast2Header.createSendFirstSeqnoHeader(seqno_received);
@@ -929,6 +948,9 @@ public class UNICAST2 extends Protocol implements Retransmitter.RetransmitComman
 
     @ManagedOperation(description="Closes connections that have been idle for more than conn_expiry_timeout ms")
     public void reapIdleConnections() {
+        if(conn_expiry_timeout <= 0)
+            return;
+
         // remove expired connections from send_table
         for(Map.Entry<Address,SenderEntry> entry: send_table.entrySet()) {
             SenderEntry val=entry.getValue();
@@ -970,8 +992,8 @@ public class UNICAST2 extends Protocol implements Retransmitter.RetransmitComman
         public static final byte STABLE           = 3;
 
         byte    type;
-        long    seqno;       // DATA, XMIT_REQ and STABLE
-        long    high_seqno;  // XMIT_REQ and STABLE
+        long    seqno;       // DATA and STABLE
+        long    high_seqno;  // STABLE
         short   conn_id;     // DATA, STABLE
         boolean first;       // DATA
 
@@ -982,12 +1004,8 @@ public class UNICAST2 extends Protocol implements Retransmitter.RetransmitComman
             return new Unicast2Header(DATA, seqno, 0L, conn_id, first);
         }
 
-        public static Unicast2Header createXmitReqHeader(long low, long high) {
-            if(low > high)
-                throw new IllegalArgumentException("low (" + low + " needs to be <= high (" + high + ")");
-            Unicast2Header retval=new Unicast2Header(XMIT_REQ, low);
-            retval.high_seqno=high;
-            return retval;
+        public static Unicast2Header createXmitReqHeader() {
+            return new Unicast2Header(XMIT_REQ);
         }
 
         public static Unicast2Header createStableHeader(short conn_id, long low, long high) {
@@ -1003,12 +1021,16 @@ public class UNICAST2 extends Protocol implements Retransmitter.RetransmitComman
             return new Unicast2Header(SEND_FIRST_SEQNO, seqno_received);
         }
 
-        private Unicast2Header(byte type, long seqno) {
+        protected Unicast2Header(byte type) {
+            this.type=type;
+        }
+
+        protected Unicast2Header(byte type, long seqno) {
             this.type=type;
             this.seqno=seqno;
         }
 
-        private Unicast2Header(byte type, long seqno, long high, short conn_id, boolean first) {
+        protected Unicast2Header(byte type, long seqno, long high, short conn_id, boolean first) {
             this.type=type;
             this.seqno=seqno;
             this.high_seqno=high;
@@ -1064,7 +1086,6 @@ public class UNICAST2 extends Protocol implements Retransmitter.RetransmitComman
                       + Global.BYTE_SIZE;    // first
                     break;
                 case XMIT_REQ:
-                    retval+=Util.size(seqno, high_seqno);
                     break;
                 case STABLE:
                     retval+=Util.size(seqno, high_seqno) + Global.SHORT_SIZE; // conn_id
@@ -1091,7 +1112,6 @@ public class UNICAST2 extends Protocol implements Retransmitter.RetransmitComman
                     out.writeBoolean(first);
                     break;
                 case XMIT_REQ:
-                    Util.writeLongSequence(seqno, high_seqno, out);
                     break;
                 case STABLE:
                     Util.writeLongSequence(seqno, high_seqno, out);
@@ -1112,12 +1132,9 @@ public class UNICAST2 extends Protocol implements Retransmitter.RetransmitComman
                     first=in.readBoolean();
                     break;
                 case XMIT_REQ:
-                    long[] seqnos=Util.readLongSequence(in);
-                    seqno=seqnos[0];
-                    high_seqno=seqnos[1];
                     break;
                 case STABLE:
-                    seqnos=Util.readLongSequence(in);
+                    long[] seqnos=Util.readLongSequence(in);
                     seqno=seqnos[0];
                     high_seqno=seqnos[1];
                     conn_id=in.readShort();
@@ -1131,75 +1148,75 @@ public class UNICAST2 extends Protocol implements Retransmitter.RetransmitComman
 
 
 
-    private static final class SenderEntry {
-        // stores (and retransmits) msgs sent by us to a certain peer
-        final AckSenderWindow   sent_msgs;
-        long                    sent_msgs_seqno=DEFAULT_FIRST_SEQNO;   // seqno for msgs sent by us
-        final short             send_conn_id;
-        private long            timestamp;
-        final Lock              lock=new ReentrantLock();
+    protected final class SenderEntry {
+        // stores (and retransmits) msgs sent by us to a given peer
+        final Table<Message>       sent_msgs;
+        final AtomicLong           sent_msgs_seqno=new AtomicLong(DEFAULT_FIRST_SEQNO);   // seqno for msgs sent by us
+        final short                send_conn_id;
+        protected final AtomicLong timestamp=new AtomicLong(0);
 
         public SenderEntry(short send_conn_id) {
             this.send_conn_id=send_conn_id;
-            sent_msgs=new AckSenderWindow();
+            this.sent_msgs=new Table<Message>(xmit_table_num_rows, xmit_table_msgs_per_row, 0,
+                                              xmit_table_resize_factor, xmit_table_max_compaction_time);
             update();
         }
 
-        void lock()   {lock.lock();}
-        void unlock() {lock.unlock();}
 
-        void reset() {
-            if(sent_msgs != null)
-                sent_msgs.reset();
-            sent_msgs_seqno=DEFAULT_FIRST_SEQNO;
-        }
-
-        void update() {timestamp=System.currentTimeMillis();}
-        long age() {return System.currentTimeMillis() - timestamp;}
+        void update() {timestamp.set(System.currentTimeMillis());}
+        long age()    {return System.currentTimeMillis() - timestamp.longValue();}
 
         public String toString() {
             StringBuilder sb=new StringBuilder();
             if(sent_msgs != null)
                 sb.append(sent_msgs).append(", ");
-            sb.append("send_conn_id=" + send_conn_id);
-            sb.append(" (" + age() + " ms old)");
+            sb.append("send_conn_id=" + send_conn_id).append(" (" + age() + " ms old)");
             return sb.toString();
         }
     }
 
-    private static final class ReceiverEntry {
-        private final NakReceiverWindow  received_msgs;  // stores all msgs rcvd by a certain peer in seqno-order
-        private final short              recv_conn_id;
-        private int                      received_bytes=0;
-        private long                     timestamp;
-        private final Lock               lock=new ReentrantLock();
+    protected final class ReceiverEntry {
+        protected final Table<Message>     received_msgs;  // stores all msgs rcvd by a certain peer in seqno-order
+        protected final short              recv_conn_id;
+        protected int                      received_bytes=0;
+        protected final AtomicLong         timestamp=new AtomicLong(0);
+        protected final Lock               lock=new ReentrantLock();
 
-        private long                     last_highest=-1;
-        private int                      num_stable_msgs=0;
-        public final int                 max_stable_msgs;
-
+        protected long                     last_highest=-1;
+        protected int                      num_stable_msgs=0;
 
 
-        public ReceiverEntry(NakReceiverWindow received_msgs, short recv_conn_id, final int max_stable_msgs) {
+
+        public ReceiverEntry(Table<Message> received_msgs, short recv_conn_id) {
             this.received_msgs=received_msgs;
             this.recv_conn_id=recv_conn_id;
-            this.max_stable_msgs=max_stable_msgs;
             update();
         }
 
-        void lock()   {lock.lock();}
-        void unlock() {lock.unlock();}
+        /** Adds len bytes, if max_bytes is exceeded, the value is reset and true returned, else false */
+        boolean incrementStable(int len) {
+            lock.lock();
+            try {
+                if(received_bytes+len >= max_bytes) {
+                    received_bytes=0;
+                    return true;
+                }
+                received_bytes+=len;
+                return false;
+            }
+            finally {
+                lock.unlock();
+            }
+        }
 
         void reset() {
-            if(received_msgs != null)
-                received_msgs.destroy();
             received_bytes=0;
             last_highest=-1;
             num_stable_msgs=0;
         }
 
-        void update() {timestamp=System.currentTimeMillis();}
-        long age() {return System.currentTimeMillis() - timestamp;}
+        void update() {timestamp.set(System.currentTimeMillis());}
+        long age() {return System.currentTimeMillis() - timestamp.longValue();}
 
         public String toString() {
             StringBuilder sb=new StringBuilder();
@@ -1215,6 +1232,32 @@ public class UNICAST2 extends Protocol implements Retransmitter.RetransmitComman
     protected class ConnectionReaper implements Runnable {
         public void run() {
             reapIdleConnections();
+        }
+    }
+
+    /**
+     * Retransmitter task which periodically (every xmit_interval ms) looks at all the retransmit tables and
+     * sends retransmit request to all members from which we have missing messages
+     */
+    protected class RetransmitTask implements Runnable {
+
+        public void run() {
+            for(Map.Entry<Address,ReceiverEntry> entry: recv_table.entrySet()) {
+                Address target=entry.getKey(); // target to send retransmit requests to
+                ReceiverEntry val=entry.getValue();
+                Table<Message> buf=val != null? val.received_msgs : null;
+                if(buf != null && buf.getNumMissing() > 0) {
+                    SeqnoList missing=buf.getMissing();
+                    if(missing != null) {
+                        // Just a double-check to avoid unneeded retransmissions: messages might have been added to or
+                        // removed from the table after calling getMissing(), and so we remove all
+                        // seqnos <= the highest delivered seqno from the retransmit list
+                        missing.remove(buf.getHighestDelivered());
+                        if(missing.size()  > 0)
+                            retransmit(missing, target);
+                    }
+                }
+            }
         }
     }
 

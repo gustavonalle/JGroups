@@ -26,9 +26,9 @@ public class FifoOrderTest extends ChannelTestBase {
     @BeforeMethod
     void setUp() throws Exception {
         barrier=new CyclicBarrier(4);
-        ch1=createChannel(true,3);
-        ch2=createChannel(ch1);
-        ch3=createChannel(ch1);
+        ch1=createChannel(true,3, "A");
+        ch2=createChannel(ch1,    "B");
+        ch3=createChannel(ch1,    "C");
     }
 
     @AfterMethod
@@ -48,9 +48,9 @@ public class FifoOrderTest extends ChannelTestBase {
         MyReceiver r1=new MyReceiver("R1"), r2=new MyReceiver("R2"), r3=new MyReceiver("R3");
         ch1.setReceiver(r1); ch2.setReceiver(r2); ch3.setReceiver(r3);
 
-        ch1.connect("ConcurrentStackTest");
-        ch2.connect("ConcurrentStackTest");
-        ch3.connect("ConcurrentStackTest");
+        ch1.connect("FifoOrderTest");
+        ch2.connect("FifoOrderTest");
+        ch3.connect("FifoOrderTest");
         View v=ch3.getView();
         assert v.size() == 3 : "view is " + v;
 

@@ -17,7 +17,9 @@ import java.util.*;
 import java.util.Map.Entry;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -42,7 +44,7 @@ public abstract class BasicConnectionTable {
     long                  conn_expire_time=300000;     // connections can be idle for 5 minutes before they are reaped
     int                   sock_conn_timeout=1000;      // max time in millis to wait for Socket.connect() to return
     int                   peer_addr_read_timeout=2000; // max time in milliseconds to block on reading peer address
-    final ThreadGroup     thread_group=new ThreadGroup(Util.getGlobalThreadGroup(), "ConnectionTable");
+    final ThreadGroup     thread_group=new ThreadGroup("ConnectionTable");
     protected final Log   log= LogFactory.getLog(getClass());
     final byte[]          cookie={'b', 'e', 'l', 'a'};
     boolean               use_reaper=false;            // by default we don't reap idle conns
@@ -57,6 +59,7 @@ public abstract class BasicConnectionTable {
     * be contacted on). If external_addr is null, it will default to the same address that the server socket is bound to.
     */
     InetAddress		    external_addr=null;
+    int                 external_port=0;
     int                 max_port=0;                   // maximum port to bind to (if < srv_port, no limit)
     Thread              acceptor=null;               // continuously calls srv_sock.accept()
     boolean             running=false;
@@ -68,7 +71,7 @@ public abstract class BasicConnectionTable {
 
 
     protected BasicConnectionTable() {        
-        factory = new DefaultThreadFactory(new ThreadGroup(Util.getGlobalThreadGroup(),"ConnectionTable"),"Connection Table", false);
+        factory = new DefaultThreadFactory(new ThreadGroup("ConnectionTable"),"Connection Table", false);
     }
 
     public final void setReceiver(Receiver r) {
@@ -718,38 +721,40 @@ public abstract class BasicConnectionTable {
 
 
        class Sender implements Runnable {
-           Thread senderThread;
-           private boolean is_it_running=false;
+           AtomicReference<Thread> senderThread = new AtomicReference<Thread>();
+           private AtomicBoolean is_it_running=new AtomicBoolean();
 
            void start() {
-               if(senderThread == null || !senderThread.isAlive()) {
-                   senderThread=getThreadFactory().newThread(thread_group,this, "ConnectionTable.Connection.Sender local_addr=" + local_addr + " [" + getSockAddress() + "]");                   
-                   senderThread.setDaemon(true);
-                   is_it_running=true;
-                   senderThread.start();
-                   if(log.isTraceEnabled())
-                       log.trace("sender thread started: " + senderThread);
+               Thread localThread=senderThread.getAndSet(getThreadFactory()
+                                                           .newThread(thread_group, this,
+                                                                      "ConnectionTable.Connection.Sender local_addr=" + local_addr + " [" + getSockAddress() + "]"));
+               if(localThread == null ) {
+                   is_it_running.set(true);
+                   senderThread.get().setDaemon(true);
+                   senderThread.get().start();
+                   if(log.isTraceEnabled()) log.trace("sender thread started: " + senderThread);
                }
            }
 
+
+
            void stop() {
-               is_it_running=false;
+               is_it_running.set(false);
                if(send_queue != null)
                    send_queue.clear();
-               if(senderThread != null) {
-                   Thread tmp=senderThread;
-                   senderThread=null;
-                   Util.interruptAndWaitToDie(tmp);
+               Thread localThread = senderThread.getAndSet(null);
+               if(localThread != null) {
+                   Util.interruptAndWaitToDie(localThread);
                }
            }
 
            boolean isRunning() {
-               return is_it_running && senderThread != null;
+               return is_it_running.get() && senderThread.get() != null;
            }
 
            public void run() {
                byte[] data;
-               while(senderThread != null && senderThread.equals(Thread.currentThread()) && is_it_running) {
+               while(senderThread.get() != null && senderThread.get().equals(Thread.currentThread()) && is_it_running.get()) {
                    try {
                        data=send_queue.take();
                        if(data == null)
@@ -761,7 +766,7 @@ public abstract class BasicConnectionTable {
                        ;
                    }
                }
-               is_it_running=false;
+               is_it_running.set(false);
                if(log.isTraceEnabled())
                    log.trace("ConnectionTable.Connection.Sender thread terminated");
            }

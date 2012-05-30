@@ -23,6 +23,7 @@ import java.net.NetworkInterface;
 import java.text.NumberFormat;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.ReentrantLock;
 
 
@@ -85,7 +86,11 @@ public abstract class TP extends Protocol {
       "the local IP (e.g. 192.168.1.100) of the host then on each host, set \"external_addr\" TCP transport " +
       "parameter to the external (public IP) address of the firewall.",
               systemProperty=Global.EXTERNAL_ADDR,writable=false)
-    protected InetAddress external_addr=null ;
+    protected InetAddress external_addr=null;
+
+    @Property(description="Used to map the internal port (bind_port) to an external port. Only used if > 0",
+              systemProperty=Global.EXTERNAL_PORT,writable=false)
+    protected int external_port=0;
 
     @Property(name="bind_interface", converter=PropertyConverters.BindInterface.class,
     		description="The interface (NIC) which should be used by this transport", dependsUpon="bind_addr",
@@ -132,8 +137,8 @@ public abstract class TP extends Protocol {
      * Discard packets with a different version. Usually minor version differences are okay. Setting this property
      * to true means that we expect the exact same version on all incoming packets
      */
-    @Property(description="Discard packets with a different version if true. Default is false")
-    protected boolean discard_incompatible_packets=false;
+    @Property(description="Discard packets with a different version if true")
+    protected boolean discard_incompatible_packets=true;
 
 
     @Property(description="Thread naming pattern for threads in this channel. Default is cl")
@@ -226,6 +231,9 @@ public abstract class TP extends Protocol {
 
     @Property(description="Port for diagnostic probing. Default is 7500")
     protected int diagnostics_port=7500;
+
+    @Property(description="TTL of the diagnostics multicast socket")
+    protected int diagnostics_ttl=8;
 
     @Property(description="If assigned enable this transport to be a singleton (shared) transport")
     protected String singleton_name=null;
@@ -420,7 +428,17 @@ public abstract class TP extends Protocol {
      * members contains *all* members from all channels sitting on the shared transport */
     protected final Set<Address> members=new CopyOnWriteArraySet<Address>();
 
-    protected ThreadGroup pool_thread_group=new ThreadGroup(Util.getGlobalThreadGroup(), "Thread Pools");
+    // Used to be the global thread group (moved here from Util)
+    protected ThreadGroup channel_thread_group=new ThreadGroup("JGroups channel") {
+            public void uncaughtException(Thread t, Throwable e) {
+                log.error("uncaught exception in " + t + " (thread group=" + this + " )", e);
+                final ThreadGroup tgParent = getParent();
+                if(tgParent != null)
+                    tgParent.uncaughtException(t,e);
+            }
+        };
+
+    protected ThreadGroup pool_thread_group=new ThreadGroup(getChannelThreadGroup(), "Thread Pools");
 
     /** Keeps track of connects and disconnects, in order to start and stop threads */
     protected int connect_count=0;
@@ -485,7 +503,7 @@ public abstract class TP extends Protocol {
      * <br/>
      * The keys are logical addresses, the values physical addresses
      */
-    protected LazyRemovalCache<Address,PhysicalAddress> logical_addr_cache=null;
+    protected LazyRemovalCache<Address,PhysicalAddress> logical_addr_cache;
 
     // last time we sent a discovery request
     protected long last_discovery_request=0;
@@ -509,7 +527,7 @@ public abstract class TP extends Protocol {
 
     /** Cache keeping track of WHO_HAS requests for physical addresses (given a logical address) and expiring
      * them after 5000ms */
-    protected AgeOutCache<Address> who_has_cache=null;
+    protected AgeOutCache<Address> who_has_cache;
 
 
     /**
@@ -560,6 +578,10 @@ public abstract class TP extends Protocol {
 
     public ThreadGroup getPoolThreadGroup() {
         return pool_thread_group;
+    }
+
+    public ThreadGroup getChannelThreadGroup() {
+        return channel_thread_group;
     }
 
     public void setThreadPoolQueueEnabled(boolean flag) {thread_pool_queue_enabled=flag;}
@@ -807,11 +829,11 @@ public abstract class TP extends Protocol {
 
         // Create the default thread factory
         if(global_thread_factory == null)
-            global_thread_factory=new DefaultThreadFactory(Util.getGlobalThreadGroup(), "", false);
+            global_thread_factory=new DefaultThreadFactory(getChannelThreadGroup(), "", false);
 
         // Create the timer and the associated thread factory - depends on singleton_name
         if(timer_thread_factory == null)
-            timer_thread_factory=new LazyThreadFactory(Util.getGlobalThreadGroup(), "Timer", true, true);
+            timer_thread_factory=new LazyThreadFactory(getChannelThreadGroup(), "Timer", true, true);
         if(isSingleton())
             timer_thread_factory.setIncludeClusterName(false);
 
@@ -846,7 +868,7 @@ public abstract class TP extends Protocol {
             }
         }
 
-        who_has_cache=new AgeOutCache<Address>(timer, 5000L);
+        who_has_cache=new AgeOutCache<Address>(timer, 2000L);
 
         Util.verifyRejectionPolicy(oob_thread_pool_rejection_policy);
         Util.verifyRejectionPolicy(thread_pool_rejection_policy);
@@ -888,6 +910,8 @@ public abstract class TP extends Protocol {
             m.put("bind_addr", bind_addr);
         if(external_addr != null)
             m.put("external_addr", external_addr);
+        if(external_port > 0)
+            m.put("external_port", external_port);
         if(!m.isEmpty())
             up(new Event(Event.CONFIG, m));
 
@@ -945,7 +969,7 @@ public abstract class TP extends Protocol {
             boolean diag_handler_created=diag_handler == null;
             if(diag_handler == null)
                 diag_handler=new DiagnosticsHandler(diagnostics_addr, diagnostics_port, diagnostics_bind_interfaces,
-                                                    log, getSocketFactory(), getThreadFactory());
+                                                    diagnostics_ttl, log, getSocketFactory(), getThreadFactory());
 
             diag_handler.registerProbeHandler(new DiagnosticsHandler.ProbeHandler() {
                 public Map<String, String> handleProbe(String... keys) {
@@ -996,8 +1020,13 @@ public abstract class TP extends Protocol {
         if(enable_bundling) {
             if(bundler_type.equals("new")) 
                 bundler=new TransferQueueBundler(bundler_capacity);
+            else if(bundler_type.equals("new2"))
+                bundler=new TransferQueueBundler2(bundler_capacity);
             else if(bundler_type.equals("old"))
                 bundler=new DefaultBundler();
+            else if(bundler_type.endsWith("old2")) {
+                bundler=new DefaultBundler2();
+            }
             else
                 log.warn("bundler_type \"" + bundler_type + "\" not known; using default bundler");
             if(bundler == null)
@@ -1088,13 +1117,12 @@ public abstract class TP extends Protocol {
         }
 
         final boolean multicast=dest == null;
-        if(loopback && (multicast || (dest.equals(msg.getSrc()) && dest.equals(local_addr)))) {
+        if(loopback && (multicast || dest.equals(msg.getSrc()))) {
 
             // we *have* to make a copy, or else up_prot.up() might remove headers from msg which will then *not*
             // be available for marshalling further down (when sending the message)
             final Message copy=msg.copy();
-            if(log.isTraceEnabled()) log.trace(new StringBuilder("looping back message ").append(copy));
-            // up_prot.up(new Event(Event.MSG, copy));
+            if(log.isTraceEnabled()) log.trace("looping back message " + copy);
 
             // changed to fix http://jira.jboss.com/jira/browse/JGRP-506
             Executor pool=msg.isFlagSet(Message.OOB)? oob_thread_pool : thread_pool;
@@ -1271,17 +1299,30 @@ public abstract class TP extends Protocol {
 
 
     protected void sendToSingleMember(Address dest, byte[] buf, int offset, int length) throws Exception {
-        PhysicalAddress physical_dest=dest instanceof PhysicalAddress? (PhysicalAddress)dest : getPhysicalAddressFromCache(dest);
-        if(physical_dest == null) {
-            if(!who_has_cache.contains(dest)) {
-                who_has_cache.add(dest);
-                if(log.isWarnEnabled())
-                    log.warn(local_addr+  ": no physical address for " + dest + ", dropping message");
-                up(new Event(Event.GET_PHYSICAL_ADDRESS, dest));
-            }
+        if(dest instanceof PhysicalAddress) {
+            sendUnicast((PhysicalAddress)dest, buf, offset, length);
             return;
         }
-        sendUnicast(physical_dest, buf, offset, length);
+
+        PhysicalAddress physical_dest=null;
+        int cnt=1;
+        long sleep_time=20;
+        while((physical_dest=getPhysicalAddressFromCache(dest)) == null && cnt++ <= 10) {
+            if(!who_has_cache.contains(dest)) {
+                who_has_cache.add(dest);
+                Util.sleepRandom(1, 500); // to prevent a discovery flood in large clusters (by staggering requests)
+                if((physical_dest=getPhysicalAddressFromCache(dest)) != null)
+                    break;
+                up(new Event(Event.GET_PHYSICAL_ADDRESS, dest));
+            }
+            Util.sleep(sleep_time);
+            sleep_time=Math.min(1000, sleep_time *2);
+        }
+
+        if(physical_dest != null)
+            sendUnicast(physical_dest, buf, offset, length);
+        else if(log.isWarnEnabled())
+            log.warn(local_addr+  ": no physical address for " + dest + ", dropping message");
     }
 
 
@@ -1742,7 +1783,7 @@ public abstract class TP extends Protocol {
         int                                num_msgs=0;
         @GuardedBy("lock")
         int                                num_bundling_tasks=0;
-        long                               last_bundle_time;
+        long                               last_bundle_time; // in nanoseconds
         final ReentrantLock                lock=new ReentrantLock();
         final Log                          log=LogFactory.getLog(getClass());
 
@@ -1792,7 +1833,7 @@ public abstract class TP extends Protocol {
             SingletonAddress dest=new SingletonAddress(cluster_name, dst);
 
             if(msgs.isEmpty())
-                last_bundle_time=System.currentTimeMillis();
+                last_bundle_time=System.nanoTime();
             List<Message> tmp=msgs.get(dest);
             if(tmp == null) {
                 tmp=new LinkedList<Message>();
@@ -1810,13 +1851,13 @@ public abstract class TP extends Protocol {
          */
         private void sendBundledMessages(final Map<SingletonAddress,List<Message>> msgs) {
             if(log.isTraceEnabled()) {
-                long stop=System.currentTimeMillis();
                 double percentage=100.0 / max_bundle_size * count;
                 StringBuilder sb=new StringBuilder("sending ").append(num_msgs).append(" msgs (");
                 num_msgs=0;
                 sb.append(count).append(" bytes (" + f.format(percentage) + "% of max_bundle_size)");
                 if(last_bundle_time > 0) {
-                    sb.append(", collected in ").append(stop-last_bundle_time).append("ms) ");
+                    long diff=(System.nanoTime() - last_bundle_time) / 1000000;
+                    sb.append(", collected in ").append(diff).append("ms) ");
                 }
                 sb.append(" to ").append(msgs.size()).append(" destination(s)");
                 if(msgs.size() > 1) sb.append(" (dests=").append(msgs.keySet()).append(")");
@@ -1885,6 +1926,323 @@ public abstract class TP extends Protocol {
         }
     }
 
+    private class DefaultBundler2 implements Bundler {
+        /** Keys are destinations, values are lists of Messages */
+        final Map<SingletonAddress,List<Message>>  msgs=new HashMap<SingletonAddress,List<Message>>(8);
+
+        final ExposedByteArrayOutputStream bundler_out_stream=new ExposedByteArrayOutputStream(1024);
+        final ExposedDataOutputStream bundler_dos=new ExposedDataOutputStream(bundler_out_stream);
+
+        @GuardedBy("lock")
+        long                               count=0;    // current number of bytes accumulated
+        int                                num_msgs=0;
+
+        protected final AtomicInteger      thread_cnt=new AtomicInteger(0);
+
+        final ReentrantLock                lock=new ReentrantLock();
+        final Log                          log=LogFactory.getLog(getClass());
+
+        public void start() {}
+        public void stop() {}
+
+        public void send(Message msg) throws Exception {
+            long length=msg.size();
+            checkLength(length);
+
+            thread_cnt.incrementAndGet();
+
+            lock.lock();
+            try {
+                if(count + length >= max_bundle_size) {
+                    sendBundledMessages(msgs);
+                }
+                addMessage(msg);
+                count+=length;
+                if(thread_cnt.decrementAndGet() == 0) {
+                    if(num_msgs == 1)
+                        sendSingleMessage(msg);
+                    else
+                        sendBundledMessages(msgs);
+                }
+            }
+            finally {
+                lock.unlock();
+            }
+        }
+        
+
+        /** Run with lock acquired */
+        private void addMessage(Message msg) {
+            Address dst=msg.getDest();
+            String cluster_name;
+
+            if(!isSingleton())
+                cluster_name=TP.this.channel_name;
+            else {
+                TpHeader hdr=(TpHeader)msg.getHeader(id);
+                cluster_name=hdr.channel_name;
+            }
+
+            SingletonAddress dest=new SingletonAddress(cluster_name, dst);
+
+            List<Message> tmp=msgs.get(dest);
+            if(tmp == null) {
+                tmp=new ArrayList<Message>();
+                msgs.put(dest, tmp);
+            }
+            tmp.add(msg);
+            num_msgs++;
+        }
+
+
+        /**
+         * Sends all messages from the map, all messages for the same destination are bundled into 1 message.
+         * This method may be called by timer and bundler concurrently
+         * @param msgs
+         */
+        private void sendBundledMessages(final Map<SingletonAddress,List<Message>> msgs) {
+
+            // System.out.println("sending " + num_msgs + " msgs, count=" + count);
+
+            if(log.isTraceEnabled()) {
+                double percentage=100.0 / max_bundle_size * count;
+                StringBuilder sb=new StringBuilder("sending ").append(num_msgs).append(" msgs (");
+                num_msgs=0;
+                sb.append(count).append(" bytes (" + f.format(percentage) + "% of max_bundle_size)");
+                sb.append(" to ").append(msgs.size()).append(" destination(s)");
+                if(msgs.size() > 1) sb.append(" (dests=").append(msgs.keySet()).append(")");
+                log.trace(sb);
+            }
+
+            num_msgs=0;
+
+            for(Map.Entry<SingletonAddress,List<Message>> entry: msgs.entrySet()) {
+                List<Message> list=entry.getValue();
+                if(list.isEmpty())
+                    continue;
+                SingletonAddress dst=entry.getKey();
+                Address dest=dst.getAddress();
+                Address src_addr=list.get(0).getSrc();
+
+                boolean multicast=dest == null;
+                try {
+                    bundler_out_stream.reset();
+                    bundler_dos.reset();
+                    writeMessageList(dest, src_addr, list, bundler_dos, multicast); // flushes output stream when done
+                    Buffer buffer=new Buffer(bundler_out_stream.getRawBuffer(), 0, bundler_out_stream.size());
+                    doSend(buffer, dest, multicast);
+                }
+                catch(Throwable e) {
+                    if(log.isErrorEnabled()) log.error("exception sending bundled msgs", e);
+                }
+            }
+            msgs.clear();
+            count=0;
+        }
+
+
+        private void sendSingleMessage(final Message msg) {
+
+            // System.out.println("sending single message, num_msgs=" + num_msgs + " msgs, count=" + count);
+
+            num_msgs=0;
+            msgs.clear();
+            count=0;
+
+            Address dest=msg.getDest();
+
+            boolean multicast=dest == null;
+            try {
+                bundler_out_stream.reset();
+                bundler_dos.reset();
+                writeMessage(msg, bundler_dos, multicast);
+                Buffer buffer=new Buffer(bundler_out_stream.getRawBuffer(), 0, bundler_out_stream.size());
+                doSend(buffer, dest, multicast);
+            }
+            catch(Throwable e) {
+                if(log.isErrorEnabled()) log.error("exception sending msg " + msg, e);
+            }
+
+        }
+
+
+
+        private void checkLength(long len) throws Exception {
+            if(len > max_bundle_size)
+                throw new Exception("message size (" + len + ") is greater than max bundling size (" + max_bundle_size +
+                        "). Set the fragmentation/bundle size in FRAG and TP correctly");
+        }
+
+    }
+
+
+
+
+    private class TransferQueueBundler2 implements Bundler, Runnable {
+        final int                          threshold;
+        final BlockingQueue<Message>       buffer;
+        volatile Thread                    bundler_thread;
+        final Log                          log=LogFactory.getLog(getClass());
+
+        /** Keys are destinations, values are lists of Messages */
+        final Map<SingletonAddress,List<Message>>  msgs=new HashMap<SingletonAddress,List<Message>>(36);
+
+        final ExposedByteArrayOutputStream bundler_out_stream=new ExposedByteArrayOutputStream(1024);
+        final ExposedDataOutputStream      bundler_dos=new ExposedDataOutputStream(bundler_out_stream);
+        long                               count=0;    // current number of bytes accumulated
+        int                                num_msgs=0;
+        volatile boolean                   running=true;
+        public static final String         THREAD_NAME="TransferQueueBundler";
+
+
+
+        private TransferQueueBundler2(int capacity) {
+            if(capacity <=0) throw new IllegalArgumentException("Bundler capacity cannot be " + capacity);
+            buffer=new LinkedBlockingQueue<Message>(capacity);
+            threshold=(int)(capacity * .9); // 90% of capacity
+        }
+
+        public void start() {
+            if(bundler_thread == null || !bundler_thread.isAlive()) {
+                bundler_thread=getThreadFactory().newThread(this, THREAD_NAME);
+                running=true;
+                bundler_thread.start();
+            }
+        }
+
+        public Thread getThread() {return bundler_thread;}
+
+        public void stop() {
+            running=false;
+            if(bundler_thread != null)
+                bundler_thread.interrupt();
+        }
+
+        public void send(Message msg) throws Exception {
+            long length=msg.size();
+            checkLength(length);
+            buffer.put(msg);
+        }
+
+        public int getBufferSize() {
+            return buffer.size();
+        }
+
+
+
+        public void run() {
+            while(running) {
+                Message msg=null;
+                try {
+                    if(count == 0) {
+                        msg=buffer.take();
+                        if(msg == null)
+                            continue;
+                        long size=msg.size();
+                        if(count + size >= max_bundle_size || buffer.size() >= threshold) {
+                            sendMessages();
+                        }
+                        addMessage(msg);
+                        count+=size;
+                    }
+                    while(null != (msg=buffer.poll())) {
+                        long size=msg.size();
+                        if(count + size >= max_bundle_size || buffer.size() >= threshold) {
+                            sendMessages();
+                        }
+                        addMessage(msg);
+                        count+=size;
+                    }
+                    if(count > 0)
+                        sendMessages();
+                }
+                catch(Throwable t) {
+                }
+            }
+        }
+
+
+        void sendMessages() {
+            sendBundledMessages(msgs);
+            msgs.clear();
+            count=0;
+        }
+
+        private void checkLength(long len) throws Exception {
+            if(len > max_bundle_size)
+                throw new Exception("message size (" + len + ") is greater than max bundling size (" + max_bundle_size +
+                        "). Set the fragmentation/bundle size in FRAG and TP correctly");
+        }
+
+
+        private void addMessage(Message msg) {
+            Address dst=msg.getDest();
+            String cluster_name;
+
+            if(!isSingleton())
+                cluster_name=TP.this.channel_name;
+            else {
+                TpHeader hdr=(TpHeader)msg.getHeader(id);
+                cluster_name=hdr.channel_name;
+            }
+
+            SingletonAddress dest=new SingletonAddress(cluster_name, dst);
+
+            List<Message> tmp=msgs.get(dest);
+            if(tmp == null) {
+                tmp=new LinkedList<Message>();
+                msgs.put(dest, tmp);
+            }
+            tmp.add(msg);
+            num_msgs++;
+        }
+
+
+
+        /**
+         * Sends all messages from the map, all messages for the same destination are bundled into 1 message.
+         * This method may be called by timer and bundler concurrently
+         * @param msgs
+         */
+        private void sendBundledMessages(final Map<SingletonAddress,List<Message>> msgs) {
+            boolean   multicast;
+
+            if(log.isTraceEnabled()) {
+                double percentage=100.0 / max_bundle_size * count;
+                StringBuilder sb=new StringBuilder("sending ").append(num_msgs).append(" msgs (");
+                sb.append(count).append(" bytes (" + f.format(percentage) + "% of max_bundle_size)");
+                sb.append(" to ").append(msgs.size()).append(" destination(s)");
+                if(msgs.size() > 1) sb.append(" (dests=").append(msgs.keySet()).append(")");
+                log.trace(sb);
+                num_msgs=0;
+            }
+
+
+            for(Map.Entry<SingletonAddress,List<Message>> entry: msgs.entrySet()) {
+                List<Message> list=entry.getValue();
+                if(list.isEmpty())
+                    continue;
+
+                SingletonAddress dst=entry.getKey();
+                Address dest=dst.getAddress();
+                Address src_addr=list.get(0).getSrc();
+
+                multicast=dest == null;
+                try {
+                    bundler_out_stream.reset();
+                    bundler_dos.reset();
+                    writeMessageList(dest, src_addr, list, bundler_dos, multicast); // flushes output stream when done
+                    Buffer buf=new Buffer(bundler_out_stream.getRawBuffer(), 0, bundler_out_stream.size());
+                    doSend(buf, dest, multicast);
+                }
+                catch(Throwable e) {
+                    if(log.isErrorEnabled()) log.error("exception sending bundled msgs: " + e + ":, cause: " + e.getCause());
+                }
+            }
+        }
+
+
+    }
 
 
     private class TransferQueueBundler implements Bundler, Runnable {
@@ -2000,7 +2358,7 @@ public abstract class TP extends Protocol {
             }
 
             SingletonAddress dest=new SingletonAddress(cluster_name, dst);
-            
+
             List<Message> tmp=msgs.get(dest);
             if(tmp == null) {
                 tmp=new LinkedList<Message>();
@@ -2084,7 +2442,7 @@ public abstract class TP extends Protocol {
             this.up_prot=up;
             this.down_prot=down;
             this.header=new TpHeader(cluster_name);
-            this.factory=new DefaultThreadFactory(Util.getGlobalThreadGroup(), "", false);
+            this.factory=new DefaultThreadFactory(getChannelThreadGroup(), "", false);
             factory.setPattern(pattern);
             if(local_addr != null)
                 factory.setAddress(local_addr.toString());

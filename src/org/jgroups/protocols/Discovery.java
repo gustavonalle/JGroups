@@ -32,18 +32,23 @@ public abstract class Discovery extends Protocol {
     
     /* -----------------------------------------    Properties     -------------------------------------------------- */
 
-    @Property(description="Timeout to wait for the initial members. Default is 3000 msec")
+    @Property(description="Timeout to wait for the initial members")
     protected long timeout=3000;
 
-    @Property(description="Minimum number of initial members to get a response from. Default is 2")
-    protected int num_initial_members=4;
+    @Property(description="Minimum number of initial members to get a response from")
+    protected int num_initial_members=10;
 
+    @Deprecated
     @Property(description="Minimum number of server responses (PingData.isServer()=true). If this value is " +
-            "greater than 0, we'll ignore num_initial_members")
+            "greater than 0, we'll ignore num_initial_members",deprecatedMessage="not used anymore")
     protected int num_initial_srv_members=0;
 
     @Property(description="Return from the discovery phase as soon as we have 1 coordinator response")
     protected boolean break_on_coord_rsp=true;
+
+    @Property(description="Whether or not to return the entire logical-physical address cache mappings on a " +
+      "discovery request, or not.")
+    protected boolean return_entire_cache=false;
 
     @Property(description="If greater than 0, we'll wait a random number of milliseconds in range [0..stagger_timeout] " +
       "before sending a discovery response. This prevents traffic spikes in large clusters when everyone sends their " +
@@ -202,7 +207,7 @@ public abstract class Discovery extends Protocol {
                                          boolean break_on_coord, ViewId view_id) {
         num_discovery_requests++;
 
-        final Responses rsps=new Responses(num_expected_rsps, num_initial_srv_members, break_on_coord, promise);
+        final Responses rsps=new Responses(num_expected_rsps, break_on_coord, promise);
         synchronized(ping_responses) {
             ping_responses.add(rsps);
         }
@@ -420,10 +425,23 @@ public abstract class Discovery extends Protocol {
                             return null;
                         }
 
-                        List<PhysicalAddress> physical_addrs=hdr.view_id != null? null :
-                          Arrays.asList((PhysicalAddress)down(new Event(Event.GET_PHYSICAL_ADDRESS, local_addr)));
-                        sendDiscoveryResponse(local_addr, physical_addrs, is_server, hdr.view_id != null,
-                                              UUID.get(local_addr), msg.getSrc());
+                        if(return_entire_cache) {
+                            Map<Address,PhysicalAddress> cache=(Map<Address,PhysicalAddress>)down(new Event(Event.GET_LOGICAL_PHYSICAL_MAPPINGS));
+                            if(cache != null) {
+                                for(Map.Entry<Address,PhysicalAddress> entry: cache.entrySet()) {
+                                    Address addr=entry.getKey();
+                                    PhysicalAddress physical_addr=entry.getValue();
+                                    sendDiscoveryResponse(addr, Arrays.asList(physical_addr), is_server,
+                                                          hdr.view_id != null, UUID.get(addr), msg.getSrc());
+                                }
+                            }
+                        }
+                        else {
+                            List<PhysicalAddress> physical_addrs=hdr.view_id != null? null :
+                              Arrays.asList((PhysicalAddress)down(new Event(Event.GET_PHYSICAL_ADDRESS, local_addr)));
+                            sendDiscoveryResponse(local_addr, physical_addrs, is_server, hdr.view_id != null,
+                                                  UUID.get(local_addr), msg.getSrc());
+                        }
                         return null;
 
                     case PingHeader.GET_MBRS_RSP:   // add response to vector and notify waiting thread
@@ -631,12 +649,10 @@ public abstract class Discovery extends Protocol {
         final Promise<JoinRsp>  promise;
         final List<PingData>    ping_rsps=new ArrayList<PingData>();
         final int               num_expected_rsps;
-        final int               num_expected_srv_rsps;
         final boolean           break_on_coord_rsp;
 
-        protected Responses(int num_expected_rsps, int num_expected_srv_rsps, boolean break_on_coord_rsp, Promise<JoinRsp> promise) {
+        protected Responses(int num_expected_rsps, boolean break_on_coord_rsp, Promise<JoinRsp> promise) {
             this.num_expected_rsps=num_expected_rsps;
-            this.num_expected_srv_rsps=num_expected_srv_rsps;
             this.break_on_coord_rsp=break_on_coord_rsp;
             this.promise=promise != null? promise : new Promise<JoinRsp>();
         }
@@ -680,15 +696,8 @@ public abstract class Discovery extends Protocol {
             promise.getLock().lock();
             try {
                 while(time_to_wait > 0 && !promise.hasResult()) {
-                    // if num_expected_srv_rsps > 0, then it overrides num_expected_rsps
-                    if(num_expected_srv_rsps > 0) {
-                        int received_srv_rsps=getNumServerResponses(ping_rsps);
-                        if(received_srv_rsps >= num_expected_srv_rsps)
-                            return new LinkedList<PingData>(ping_rsps);
-                    }
-                    else if(ping_rsps.size() >= num_expected_rsps) {
+                    if(ping_rsps.size() >= num_expected_rsps && (break_on_coord_rsp && containsCoordinatorResponse(ping_rsps)))
                         return new LinkedList<PingData>(ping_rsps);
-                    }
 
                     if(break_on_coord_rsp &&  containsCoordinatorResponse(ping_rsps))
                         return new LinkedList<PingData>(ping_rsps);
@@ -703,14 +712,6 @@ public abstract class Discovery extends Protocol {
             }
         }
 
-        private static int getNumServerResponses(Collection<PingData> rsps) {
-            int cnt=0;
-            for(PingData rsp: rsps) {
-                if(rsp.isServer())
-                    cnt++;
-            }
-            return cnt;
-        }
 
         private static boolean containsCoordinatorResponse(Collection<PingData> rsps) {
             if(rsps == null || rsps.isEmpty())

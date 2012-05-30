@@ -238,7 +238,7 @@ public class SizeTest {
         hdr=UNICAST.UnicastHeader.createAckHeader(322649);
         _testSize(hdr);
 
-        hdr=UNICAST.UnicastHeader.createSendFirstSeqnoHeader();
+        hdr=UNICAST.UnicastHeader.createSendFirstSeqnoHeader(33333);
         _testSize(hdr);
     }
 
@@ -275,15 +275,7 @@ public class SizeTest {
         _testSize(hdr);
         _testMarshalling(hdr);
 
-        hdr=UNICAST2.Unicast2Header.createXmitReqHeader(0, 0);
-        _testSize(hdr);
-        _testMarshalling(hdr);
-
-        hdr=UNICAST2.Unicast2Header.createXmitReqHeader(70000, 100000);
-        _testSize(hdr);
-        _testMarshalling(hdr);
-
-        hdr=UNICAST2.Unicast2Header.createXmitReqHeader(Integer.MAX_VALUE, (long)Integer.MAX_VALUE +100);
+        hdr=UNICAST2.Unicast2Header.createXmitReqHeader();
         _testSize(hdr);
         _testMarshalling(hdr);
 

@@ -6,7 +6,7 @@
         build.xml file for JGroups. Needs Ant (jakarta.apache.org) to run
     </description>
 
-    <property name="version" value="3.1.0.Alpha1"/>
+    <property name="version" value="3.1.0.Beta2"/>
     <property name="build.properties.file" value="build.properties"/>
     <property file="${build.properties.file}"/>
     <property name="root.dir" value="${basedir}"/>
@@ -33,13 +33,12 @@
     <property name="bin.dir"          value="${root.dir}/bin"/>
     <property name="keystore.dir"     value="${root.dir}/keystore"/>
     <property name="javadoc.packages" value="org.jgroups.*"/>
-    <!--<property name="javadoc.packages" value="org.jgroups,org.jgroups.blocks"/>-->
     <property name="timestamp"        value=".timestamp"/>
     <property name="protocols.xml"    value="${manual.dir}/en/modules/protocols.xml"/>
     <property name="maven.executable" value="mvn"/>
 
 	<!-- 5 minutes per test suite timeout -->
-    <property name="unittest.timeout.low" value="500000"/>
+    <property name="unittest.timeout" value="1800000"/>
 
     <!-- default properties used in all test targets -->
     <property name="channel.conf" value="udp.xml"/>
@@ -302,6 +301,7 @@
         <delete dir="${dist.dir}" failonerror="false"/>
         <delete dir="${tmp.dir}" failonerror="false"/>
         <delete dir="${root.dir}/test-output" failonerror="false"/>
+        <delete dir="${root.dir}/target" failonerror="false"/>
         <delete dir="${keystore.dir}" failonerror="false"/>
         <delete file="${lib.dir}/jboss-test.jar" failonerror="false"/>
         <delete file="${root.dir}/velocity.log*" failonerror="false"/>
@@ -371,13 +371,13 @@
         <sequential>
         	<antcall target="functional"/>
             <!--<antcall target="byteman"/>-->
-            <antcall target="time-sensitive"/>
         	<antcall target="stack-independent"/>
             <antcall target="udp"/>
             <antcall target="tcp"/>
             <antcall target="tcp-stress"/>
         	<antcall target="udp-flush"/>
         	<antcall target="tcp-flush"/>
+            <antcall target="time-sensitive"/>
         </sequential>
     </target>
 
@@ -547,7 +547,7 @@
                     usedefaultlisteners="false"
                     outputdir="@{outputdir}"
                     listeners="org.jgroups.util.JUnitXMLReporter"
-            		timeout="${unittest.timeout.low}"
+            		timeout="${unittest.timeout}"
             	    verbose="${test.verbose}"
                     >
                 <xmlfileset dir="${testng.conf.dir}" includes="@{testng.xmlfile}"/>
@@ -564,7 +564,8 @@
                 <jvmarg value="-Dlog4j.configuration=file:${conf.dir}/log4j.properties"/>
                 <jvmarg value="-Djava.net.preferIPv4Stack=${java.net.preferIPv4Stack}"/>                
     		  	<jvmarg value="-Djava.net.preferIPv6Addresses=${java.net.preferIPv6Addresses}"/>
-                <jvmarg value="-Xmx300M"/>
+                <jvmarg value="-Xms400M"/>
+                <jvmarg value="-Xmx800M"/>
             </testng>
         </sequential>
     </macrodef>

@@ -3,11 +3,8 @@ package org.jgroups.protocols;
 import org.jgroups.Address;
 import org.jgroups.Event;
 import org.jgroups.PhysicalAddress;
-import org.jgroups.annotations.DeprecatedProperty;
 import org.jgroups.annotations.Property;
-import org.jgroups.stack.Protocol;
 
-import java.net.InetAddress;
 import java.util.Collection;
 import java.util.HashSet;
 import java.util.Set;

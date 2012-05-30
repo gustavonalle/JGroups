@@ -81,7 +81,7 @@ public class PromiseTest {
         };
         t.start();
         long start=System.currentTimeMillis(), stop;
-        Object result=p.getResult(100000);
+        Object result=p.getResult(30000);
         stop=System.currentTimeMillis();
         System.out.println("-- waited for " + (stop-start) + "ms, result is " + result);
         assert result != null;
@@ -90,6 +90,15 @@ public class PromiseTest {
         assert p.getResult().equals("Bela");
     }
 
+
+    public static void testReset() {
+        final Promise p=new Promise();
+        Resetter resetter=new Resetter(p, 2000);
+        resetter.start();
+        Object result=p.getResultWithTimeout(5000);
+        System.out.println("result = " + result);
+        assert result == null;
+    }
 
 
 
@@ -121,6 +130,23 @@ public class PromiseTest {
         public void run() {
             Util.sleep(wait_time);
             target.interrupt();
+        }
+    }
+
+
+    static class Resetter extends Thread {
+        protected final Promise<?> target;
+        protected final long       wait_time;
+
+        public Resetter(Promise<?> target, long wait_time) {
+            this.target=target;
+            this.wait_time=wait_time;
+        }
+
+        public void run() {
+            Util.sleep(wait_time);
+            // target.reset();
+            target.setResult(null);
         }
     }
 

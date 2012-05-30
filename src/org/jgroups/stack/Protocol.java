@@ -5,6 +5,7 @@ package org.jgroups.stack;
 
 import org.jgroups.Event;
 import org.jgroups.annotations.ManagedAttribute;
+import org.jgroups.annotations.ManagedOperation;
 import org.jgroups.annotations.Property;
 import org.jgroups.conf.ClassConfigurator;
 import org.jgroups.jmx.ResourceDMBean;
@@ -160,6 +161,10 @@ public abstract class Protocol {
         return down_prot != null? down_prot.getSocketFactory() : null;
     }
 
+    public ThreadGroup getChannelThreadGroup() {
+        return down_prot != null? down_prot.getChannelThreadGroup() : null;
+    }
+
     /**
      * Sets a SocketFactory. Socket factories are typically provided by the transport ({@link org.jgroups.protocols.TP})
      * or {@link org.jgroups.protocols.TP.ProtocolAdapter}
@@ -178,6 +183,10 @@ public abstract class Protocol {
     public void enableStats(boolean flag) {
         stats=flag;
     }
+
+    @ManagedOperation(description="Resets all stats")
+    public void resetStatistics() {resetStats();}
+
 
     public void resetStats() {
         ;
